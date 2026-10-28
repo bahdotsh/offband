@@ -1,1 +1,440 @@
-<html><body>radar</body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Offband radar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --chart: #e6ecef;
+  --chart-deep: #d5dee3;
+  --ink: #142230;
+  --ink-soft: #5b6b78;
+  --line: #b9c6ce;
+  --link: #1f56e0;
+  --flight: #e39b12;
+  --ok: #23845a;
+  --bad: #c2412f;
+  --me: #1f56e0;
+  --peer: #8a3fb8;
+  --sans: "Familjen Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--chart);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 18px;
+  line-height: 1.4;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* The channel: the two agents and the link between them. */
+.channel {
+  display: grid;
+  grid-template-columns: minmax(180px, 22%) 1fr minmax(180px, 22%);
+  align-items: center;
+  gap: 0;
+  padding: 36px 48px 20px;
+}
+.node { display: flex; flex-direction: column; gap: 4px; }
+.node.right { text-align: right; align-items: flex-end; }
+.node .who { font-size: 64px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; }
+.node.left .who { color: var(--me); }
+.node.right .who { color: var(--peer); }
+.node .addr { font-family: var(--mono); font-size: 14px; color: var(--ink-soft); }
+.node .state { font-size: 17px; color: var(--ink-soft); min-height: 1.4em; }
+.node .state.up { color: var(--ok); font-weight: 600; }
+.node.absent .who { color: var(--line); }
+
+.lane {
+  position: relative;
+  height: 150px;
+  margin: 0 28px;
+}
+.lane .wire {
+  position: absolute; left: 0; right: 0; top: 50%;
+  height: 4px; margin-top: -2px; border-radius: 2px;
+  background: repeating-linear-gradient(90deg, var(--line) 0 14px, transparent 14px 24px);
+  transition: background 600ms;
+}
+.lane.live .wire { background: var(--link); }
+.lane .badge {
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, 34px);
+  font-size: 15px; color: var(--ink-soft);
+  white-space: nowrap;
+}
+.lane.live .badge { color: var(--link); font-weight: 600; }
+.lane .badge .lock { display: inline-block; width: 11px; height: 13px; margin-right: 6px; vertical-align: -1px;
+  border: 2px solid currentColor; border-radius: 2px; position: relative; }
+.lane .badge .lock::before { content: ""; position: absolute; left: 1px; top: -8px; width: 5px; height: 6px;
+  border: 2px solid currentColor; border-bottom: none; border-radius: 4px 4px 0 0; }
+
+.packet {
+  position: absolute; top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 6px 12px 7px;
+  border-radius: 999px;
+  background: var(--flight);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 15px;
+  white-space: nowrap;
+  max-width: 380px; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: 0 0 0 4px var(--chart);
+  will-change: left;
+}
+.packet .k { font-family: var(--sans); font-weight: 700; font-size: 16px; margin-right: 8px; }
+.packet.delivered { background: var(--ok); }
+.packet.failed { background: var(--bad); }
+
+/* The subtitle: the last thing an agent said. */
+.subtitle {
+  padding: 4px 48px 28px;
+  min-height: 132px;
+}
+.subtitle .line { font-size: 40px; font-weight: 500; line-height: 1.2; letter-spacing: -0.01em; max-width: 72ch; }
+.subtitle .line b { font-weight: 700; }
+.subtitle .line .me { color: var(--me); }
+.subtitle .line .peer { color: var(--peer); }
+.subtitle .meta { margin-top: 6px; font-size: 16px; color: var(--ink-soft); }
+
+/* Below: the shared board and the log. */
+.below {
+  display: grid;
+  grid-template-columns: 1fr minmax(320px, 30%);
+  gap: 0;
+  border-top: 2px solid var(--line);
+  min-height: 0;
+}
+.board { padding: 20px 48px 28px; min-width: 0; }
+.board h2, .log h2 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+.board .plan { color: var(--ink-soft); font-size: 16px; margin: 0 0 16px; max-width: 90ch; white-space: pre-wrap; max-height: 4.2em; overflow: hidden; }
+.columns { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.col h3 { font-size: 15px; font-weight: 600; color: var(--ink-soft); margin: 0 0 8px; padding-bottom: 6px; border-bottom: 2px solid var(--line); }
+.col[data-status="done"] h3 { border-color: var(--ok); color: var(--ok); }
+.col[data-status="doing"] h3 { border-color: var(--flight); color: #9a6608; }
+.task {
+  background: #fff; border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;
+  border-left: 5px solid var(--line);
+}
+.task.me { border-left-color: var(--me); }
+.task.peer { border-left-color: var(--peer); }
+.task .t { font-weight: 600; font-size: 16px; }
+.task .o { font-size: 14px; color: var(--ink-soft); }
+.task .f { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); margin-top: 2px; word-break: break-all; }
+.task.flash { animation: flash 1.2s ease-out; }
+@keyframes flash { from { background: #fff4d6; } to { background: #fff; } }
+.empty { color: var(--ink-soft); font-size: 16px; }
+
+.log { padding: 20px 28px 28px; border-left: 2px solid var(--line); background: var(--chart-deep); min-width: 0; overflow: hidden; }
+.log ol { list-style: none; margin: 8px 0 0; padding: 0; }
+.log li { display: grid; grid-template-columns: 4.2em 1fr; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 15px; }
+.log li .time { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); padding-top: 3px; }
+.log li .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log li .what .k { font-weight: 700; }
+.log li.out .k { color: var(--me); }
+.log li.in .k { color: var(--peer); }
+.log li .st { font-size: 13px; color: var(--ink-soft); }
+.log li .st.delivered { color: var(--ok); }
+.log li .st.failed { color: var(--bad); }
+
+.offline-note { position: fixed; right: 16px; bottom: 12px; font-size: 14px; color: var(--bad); display: none; }
+.offline-note.show { display: block; }
+
+@media (max-width: 900px) {
+  .channel { grid-template-columns: 1fr; padding: 20px 16px; gap: 8px; }
+  .node.right { text-align: left; align-items: flex-start; }
+  .node .who { font-size: 40px; }
+  .lane { margin: 8px 0; height: 110px; }
+  .subtitle { padding: 4px 16px 20px; }
+  .subtitle .line { font-size: 26px; }
+  .below { grid-template-columns: 1fr; }
+  .board { padding: 16px; }
+  .columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .log { border-left: none; border-top: 2px solid var(--line); padding: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .task.flash { animation: none; }
+}
+</style>
+</head>
+<body>
+<section class="channel" aria-label="Link between the two agents">
+  <div class="node left" id="me">
+    <div class="who" id="me-name">…</div>
+    <div class="addr" id="me-addr"></div>
+    <div class="state">This laptop</div>
+  </div>
+  <div class="lane" id="lane">
+    <div class="wire"></div>
+    <div class="badge" id="badge">Looking for an agent nearby</div>
+  </div>
+  <div class="node right absent" id="peer">
+    <div class="who" id="peer-name">nobody yet</div>
+    <div class="addr" id="peer-addr"></div>
+    <div class="state" id="peer-state"></div>
+  </div>
+</section>
+
+<section class="subtitle" aria-live="polite">
+  <div class="line" id="sub-line"></div>
+  <div class="meta" id="sub-meta"></div>
+</section>
+
+<section class="below">
+  <div class="board">
+    <h2>Shared board</h2>
+    <p class="plan" id="plan"></p>
+    <div class="columns" id="columns"></div>
+  </div>
+  <div class="log">
+    <h2>Messages</h2>
+    <ol id="log"></ol>
+  </div>
+</section>
+<div class="offline-note" id="offline">Lost the Offband daemon. Retrying.</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const STATUSES = [["todo", "To do"], ["doing", "Doing"], ["review", "Review"], ["done", "Done"]];
+const VERBS = {
+  propose: "proposes", accept: "accepts", counter: "counters", task: "assigns",
+  review: "reviews", done: "is done", chat: "says", question: "asks",
+  file: "sends", hello: "is here", game: "plays",
+};
+
+let me = { name: null, address: null };
+let partner = null;       // the peer shown on the right
+const peers = new Map();  // address -> peer view
+const packets = new Map(); // seq -> {el, msg}
+let link = null;
+
+function shortAddr(a) { return a ? a.slice(0, 10) + "…" + a.slice(-6) : ""; }
+
+function choosePartner() {
+  const list = [...peers.values()];
+  const agents = list.filter((p) => p.is_agent);
+  const pick = agents.find((p) => p.nearby) || agents[0] || list.find((p) => p.nearby) || null;
+  partner = pick;
+  renderNodes();
+}
+
+function renderNodes() {
+  $("me-name").textContent = me.name || "…";
+  $("me-addr").textContent = shortAddr(me.address);
+  const peerEl = $("peer");
+  if (!partner) {
+    peerEl.classList.add("absent");
+    $("peer-name").textContent = "nobody yet";
+    $("peer-addr").textContent = "";
+    $("peer-state").textContent = "";
+  } else {
+    peerEl.classList.remove("absent");
+    $("peer-name").textContent = partner.name || "unknown device";
+    $("peer-addr").textContent = shortAddr(partner.address);
+    const up = partner.session === "SessionConfirmed";
+    const st = $("peer-state");
+    st.classList.toggle("up", up && partner.nearby);
+    st.textContent = !partner.nearby ? "Out of range"
+      : up ? "Encrypted session up" : "Setting up encryption";
+  }
+  const lane = $("lane");
+  const live = !!(partner && partner.nearby && partner.session === "SessionConfirmed");
+  lane.classList.toggle("live", live);
+  const via = link === "BLE" ? "Bluetooth" : link === "LAN" ? "local network" : (link || (partner && partner.transport) || "");
+  const badge = $("badge");
+  if (!partner) badge.textContent = "Looking for an agent nearby";
+  else if (live) badge.innerHTML = `<span class="lock"></span>MLS end-to-end encrypted${via ? " over " + via : ""}`;
+  else badge.textContent = via ? `Found over ${via}` : "Found";
+}
+
+// --- the channel ----------------------------------------------------------
+function launch(msg) {
+  if (msg.kind === "hello") return;
+  const lane = $("lane");
+  const el = document.createElement("div");
+  el.className = "packet";
+  const outbound = msg.direction === "out";
+  const body = outbound && msg.cipher ? msg.cipher : (msg.kind === "file" ? "sealed file" : "sealed");
+  el.innerHTML = `<span class="k"></span><span class="c"></span>`;
+  el.querySelector(".k").textContent = msg.kind === "game" ? "move" : msg.kind;
+  el.querySelector(".c").textContent = body;
+  lane.appendChild(el);
+  const from = outbound ? 0 : 100, to = outbound ? 100 : 0;
+  const duration = reduceMotion ? 1 : (msg.kind === "file" ? 2600 : 1600);
+  el.style.left = from + "%";
+  const anim = el.animate([{ left: from + "%" }, { left: to + "%" }],
+    { duration, easing: "cubic-bezier(.45,.05,.35,1)", fill: "forwards" });
+  packets.set(msg.seq, { el, msg });
+  if (!outbound) el.classList.add("delivered");
+  anim.finished.then(() => {
+    setTimeout(() => {
+      el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 400, fill: "forwards" })
+        .finished.then(() => { el.remove(); packets.delete(msg.seq); });
+    }, outbound && msg.status === "sent" ? 1400 : 500);
+  });
+}
+
+function settle(msg) {
+  const p = packets.get(msg.seq);
+  if (p) {
+    p.el.classList.toggle("delivered", msg.status === "delivered");
+    p.el.classList.toggle("failed", msg.status === "failed");
+  }
+  updateLog(msg);
+}
+
+// --- subtitles -------------------------------------------------------------
+function describe(msg) {
+  const outbound = msg.direction === "out";
+  const who = outbound ? me.name : (msg.sender_name || (partner && partner.name) || "peer");
+  const cls = outbound ? "me" : "peer";
+  let text = msg.summary || "";
+  try {
+    const b = JSON.parse(text);
+    if (b && typeof b === "object") {
+      text = b.summary || b.text || b.title || b.message || b.plan || Object.values(b).filter((v) => typeof v === "string").join(". ") || text;
+    }
+  } catch (_) { /* plain text */ }
+  if (text.length > 160) text = text.slice(0, 157) + "...";
+  return { who, cls, verb: VERBS[msg.kind] || msg.kind, text };
+}
+
+function subtitle(msg) {
+  if (msg.kind === "game") return;
+  const d = describe(msg);
+  const line = $("sub-line");
+  line.innerHTML = `<b class="${d.cls}"></b> <span class="v"></span>: <span class="t"></span>`;
+  line.querySelector("b").textContent = d.who;
+  line.querySelector(".v").textContent = d.verb;
+  line.querySelector(".t").textContent = d.text;
+  if (msg.kind === "hello") line.innerHTML = `<b class="${d.cls}"></b> joined over the link`, line.querySelector("b").textContent = d.who;
+  $("sub-meta").textContent = msg.direction === "out" ? "Sent, encrypted for one recipient" : `Received over ${msg.transport === "BLE" ? "Bluetooth" : msg.transport || "the link"}, decrypted on this laptop`;
+}
+
+// --- the log ---------------------------------------------------------------
+function fmtTime(ts) { return new Date(ts * 1000).toTimeString().slice(0, 8); }
+
+function statusText(msg) {
+  if (msg.direction === "in") return msg.transport ? `via ${msg.transport}` : "";
+  if (msg.status === "delivered") return `delivered${msg.latency_ms != null ? " in " + msg.latency_ms + " ms" : ""}`;
+  return msg.status;
+}
+
+function updateLog(msg) {
+  if (msg.kind === "hello") return;
+  const ol = $("log");
+  let li = ol.querySelector(`li[data-seq="${msg.seq}"]`);
+  if (!li) {
+    li = document.createElement("li");
+    li.dataset.seq = msg.seq;
+    li.className = msg.direction;
+    li.innerHTML = `<span class="time"></span><span class="what"><span class="k"></span> <span class="s"></span><br><span class="st"></span></span>`;
+    ol.prepend(li);
+    while (ol.children.length > 60) ol.lastChild.remove();
+  }
+  li.querySelector(".time").textContent = fmtTime(msg.ts);
+  li.querySelector(".k").textContent = msg.kind === "game" ? "move" : msg.kind;
+  li.querySelector(".s").textContent = msg.summary || "";
+  const st = li.querySelector(".st");
+  st.textContent = statusText(msg);
+  st.className = "st " + (msg.status || "");
+}
+
+// --- the board -------------------------------------------------------------
+let lastBoard = new Map();
+function renderBoard(board) {
+  const notes = board.notes || {};
+  $("plan").textContent = notes.plan || notes.contract || "";
+  const cols = $("columns");
+  cols.innerHTML = "";
+  const seen = new Map();
+  for (const [status, label] of STATUSES) {
+    const col = document.createElement("div");
+    col.className = "col";
+    col.dataset.status = status;
+    col.innerHTML = `<h3>${label}</h3>`;
+    const tasks = (board.tasks || []).filter((t) => (t.status || "todo") === status);
+    for (const t of tasks) {
+      const card = document.createElement("div");
+      const owner = t.owner || "";
+      const mine = owner && me.name && owner.toLowerCase() === me.name.toLowerCase();
+      card.className = "task " + (owner ? (mine ? "me" : "peer") : "");
+      card.innerHTML = `<div class="t"></div><div class="o"></div><div class="f"></div>`;
+      card.querySelector(".t").textContent = t.title || t.id;
+      card.querySelector(".o").textContent = owner ? owner : "unassigned";
+      const files = Array.isArray(t.files) ? t.files.join(", ") : (t.files || "");
+      card.querySelector(".f").textContent = files;
+      const key = JSON.stringify(t);
+      if (lastBoard.size && lastBoard.get(t.id) !== key) card.classList.add("flash");
+      seen.set(t.id, key);
+      col.appendChild(card);
+    }
+    cols.appendChild(col);
+  }
+  lastBoard = seen;
+  if (!(board.tasks || []).length) {
+    cols.innerHTML = `<p class="empty">No tasks yet. The lead agent writes the plan here.</p>`;
+  }
+}
+
+async function loadBoard() {
+  if (!partner) return;
+  try {
+    const r = await fetch("/api/board");
+    if (r.ok) renderBoard(await r.json());
+  } catch (_) { /* the stream will bring it */ }
+}
+
+// --- the stream ------------------------------------------------------------
+function applyState(state) {
+  me = state.me;
+  link = state.link;
+  peers.clear();
+  for (const p of state.peers) peers.set(p.address, p);
+  choosePartner();
+  $("log").innerHTML = "";
+  for (const m of state.messages) updateLog(m);
+  const last = [...state.messages].reverse().find((m) => m.kind !== "game");
+  if (last) subtitle(last);
+  loadBoard();
+}
+
+function connect() {
+  const es = new EventSource("/api/stream");
+  es.onopen = () => $("offline").classList.remove("show");
+  es.onerror = () => $("offline").classList.add("show");
+  es.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    switch (ev.t) {
+      case "state": applyState(ev.state); break;
+      case "peer": {
+        const had = !!partner;
+        peers.set(ev.peer.address, ev.peer);
+        choosePartner();
+        if (!had && partner) loadBoard();
+        break;
+      }
+      case "secure": peers.set(ev.peer.address, ev.peer); choosePartner(); break;
+      case "link": link = ev.transport; renderNodes(); break;
+      case "msg": launch(ev.msg); updateLog(ev.msg); subtitle(ev.msg); break;
+      case "status": settle(ev.msg); break;
+      case "board": renderBoard(ev.board); break;
+    }
+  };
+}
+connect();
+</script>
+</body>
+</html>
