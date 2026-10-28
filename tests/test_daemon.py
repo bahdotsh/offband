@@ -80,3 +80,9 @@ async def test_only_loopback_hosts_get_in():
         assert (await c.get("http://127.0.0.1/api/stream")).status_code == 200
         assert (await c.get("http://127.0.0.1/api/game/stream")).status_code == 200
         assert (await c.post("http://127.0.0.1/", content=b"")).status_code == 403
+
+
+@pytest.mark.parametrize("wait", ["inf", "nan", "-inf"])
+async def test_waits_must_be_finite(client, wait):
+    r = await client.get(f"/api/peers?wait={wait}", headers={"X-Offband": "1"})
+    assert r.status_code == 400 and "finite" in r.json()["error"]

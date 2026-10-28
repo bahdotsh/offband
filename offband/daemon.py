@@ -23,6 +23,7 @@ import asyncio
 import functools
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -101,9 +102,12 @@ def _number(request: Request, name: str, default: float, kind: type = float) -> 
     if raw is None:
         return kind(default)
     try:
-        return kind(raw)
+        value = kind(raw)
     except ValueError:
         raise NodeError(f"{name} must be a number.") from None
+    if not math.isfinite(value):  # "inf" would hold a request open for good
+        raise NodeError(f"{name} must be a finite number.")
+    return value
 
 
 async def _json(request: Request) -> dict[str, Any]:

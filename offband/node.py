@@ -344,7 +344,7 @@ class Node:
         """Nearby peers, agents first. With ``wait_seconds``, waits until at
         least ``min_agents`` agents are known with their sessions confirmed."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + max(0.0, wait_seconds)
+        deadline = loop.time() + max(0.0, min(wait_seconds, 600.0))
         while True:
             await self._refresh_sessions()
             ready = [p for p in self.peers.values() if p.is_agent and p.session == "SessionConfirmed"]
