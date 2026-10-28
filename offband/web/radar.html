@@ -36,19 +36,24 @@ body {
   overflow-x: hidden;
 }
 
-/* The channel: the two agents and the link between them. */
+/* The channel: this agent, and one link to each agent nearby. */
 .channel {
   display: grid;
-  grid-template-columns: minmax(180px, 22%) 1fr minmax(180px, 22%);
+  grid-template-columns: minmax(180px, 22%) 1fr;
   align-items: center;
   gap: 0;
   padding: 36px 48px 20px;
 }
-.node { display: flex; flex-direction: column; gap: 4px; }
+.crew { display: flex; flex-direction: column; min-width: 0; }
+.row { display: grid; grid-template-columns: 1fr minmax(180px, 30%); align-items: center; --c: var(--peer); }
+.node { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .node.right { text-align: right; align-items: flex-end; }
-.node .who { font-size: 64px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; }
+.node .who { font-size: 64px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; overflow-wrap: anywhere; }
 .node.left .who { color: var(--me); }
-.node.right .who { color: var(--peer); }
+.node.right .who { color: var(--c); }
+.channel.many .node.right .who { font-size: 36px; }
+.channel.many .lane { height: 84px; }
+.channel.many .lane .badge { transform: translate(-50%, 14px); font-size: 13px; }
 .node .addr { font-family: var(--mono); font-size: 14px; color: var(--ink-soft); }
 .node .state { font-size: 17px; color: var(--ink-soft); min-height: 1.4em; }
 .node .state.up { color: var(--ok); font-weight: 600; }
@@ -66,6 +71,7 @@ body {
   transition: background 600ms;
 }
 .lane.live .wire { background: var(--link); }
+.channel.many .lane.live .wire { background: var(--c); }
 .lane .badge {
   position: absolute; left: 50%; top: 50%;
   transform: translate(-50%, 34px);
@@ -104,7 +110,7 @@ body {
 .subtitle .line { font-size: 40px; font-weight: 500; line-height: 1.2; letter-spacing: -0.01em; max-width: 72ch; }
 .subtitle .line b { font-weight: 700; }
 .subtitle .line .me { color: var(--me); }
-.subtitle .line .peer { color: var(--peer); }
+.subtitle .line .peer { color: var(--c, var(--peer)); }
 .subtitle .meta { margin-top: 6px; font-size: 16px; color: var(--ink-soft); }
 
 /* Below: the shared board and the log. */
@@ -127,7 +133,7 @@ body {
   border-left: 5px solid var(--line);
 }
 .task.me { border-left-color: var(--me); }
-.task.peer { border-left-color: var(--peer); }
+.task.peer { border-left-color: var(--c, var(--peer)); }
 .task .t { font-weight: 600; font-size: 16px; }
 .task .o { font-size: 14px; color: var(--ink-soft); }
 .task .f { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); margin-top: 2px; word-break: break-all; }
@@ -142,7 +148,8 @@ body {
 .log li .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log li .what .k { font-weight: 700; }
 .log li.out .k { color: var(--me); }
-.log li.in .k { color: var(--peer); }
+.log li.in .k { color: var(--c, var(--peer)); }
+.log li .to { color: var(--ink-soft); font-size: 13px; }
 .log li .st { font-size: 13px; color: var(--ink-soft); }
 .log li .st.delivered { color: var(--ok); }
 .log li .st.failed { color: var(--bad); }
@@ -152,9 +159,10 @@ body {
 
 @media (max-width: 900px) {
   .channel { grid-template-columns: 1fr; padding: 20px 16px; gap: 8px; }
-  .node.right { text-align: left; align-items: flex-start; }
+  .row { grid-template-columns: 1fr minmax(110px, 36%); }
   .node .who { font-size: 40px; }
-  .lane { margin: 8px 0; height: 110px; }
+  .channel.many .node.right .who { font-size: 24px; }
+  .lane { margin: 8px 12px 8px 0; height: 110px; }
   .subtitle { padding: 4px 16px 20px; }
   .subtitle .line { font-size: 26px; }
   .below { grid-template-columns: 1fr; }
@@ -168,21 +176,13 @@ body {
 </style>
 </head>
 <body>
-<section class="channel" aria-label="Link between the two agents">
+<section class="channel" id="channel" aria-label="Links to the agents nearby">
   <div class="node left" id="me">
     <div class="who" id="me-name">…</div>
     <div class="addr" id="me-addr"></div>
     <div class="state">This laptop</div>
   </div>
-  <div class="lane" id="lane">
-    <div class="wire"></div>
-    <div class="badge" id="badge">Looking for an agent nearby</div>
-  </div>
-  <div class="node right absent" id="peer">
-    <div class="who" id="peer-name">nobody yet</div>
-    <div class="addr" id="peer-addr"></div>
-    <div class="state" id="peer-state"></div>
-  </div>
+  <div class="crew" id="crew"></div>
 </section>
 
 <section class="subtitle" aria-live="polite">
@@ -215,54 +215,88 @@ const VERBS = {
 };
 
 let me = { name: null, address: null };
-let partner = null;       // the peer shown on the right
+let shown = [];           // the peers with a lane, in lane order
 const peers = new Map();  // address -> peer view
 const packets = new Map(); // seq -> {el, msg}
 let link = null;
+// One color per agent, kept by address so it never changes mid-run.
+const PALETTE = ["#8a3fb8", "#c2410c", "#0f766e", "#b4237a", "#5f6f0a", "#0e6fa8"];
+const colors = new Map();
 
 function shortAddr(a) { return a ? a.slice(0, 10) + "…" + a.slice(-6) : ""; }
 
-function choosePartner() {
-  const list = [...peers.values()];
+function colorOf(address) {
+  if (!colors.has(address)) colors.set(address, PALETTE[colors.size % PALETTE.length]);
+  return colors.get(address);
+}
+
+function colorByName(name) {
+  if (!name) return null;
+  for (const p of peers.values()) {
+    if (p.name && p.name.toLowerCase() === name.toLowerCase()) return colorOf(p.address);
+  }
+  return null;
+}
+
+function choosePeers() {
+  const list = [...peers.values()].sort((a, b) => (a.address < b.address ? -1 : 1));
   const agents = list.filter((p) => p.is_agent);
-  const pick = agents.find((p) => p.nearby) || agents[0] || list.find((p) => p.nearby) || null;
-  partner = pick;
+  shown = agents.length ? agents : list.filter((p) => p.nearby).slice(0, 1);
+  for (const p of shown) colorOf(p.address);
   renderNodes();
+}
+
+function laneRow(address) {
+  return document.querySelector(`.row[data-address="${CSS.escape(address)}"]`);
 }
 
 function renderNodes() {
   $("me-name").textContent = me.name || "…";
   $("me-addr").textContent = shortAddr(me.address);
-  const peerEl = $("peer");
-  if (!partner) {
-    peerEl.classList.add("absent");
-    $("peer-name").textContent = "nobody yet";
-    $("peer-addr").textContent = "";
-    $("peer-state").textContent = "";
-  } else {
-    peerEl.classList.remove("absent");
-    $("peer-name").textContent = partner.name || "unknown device";
-    $("peer-addr").textContent = shortAddr(partner.address);
-    const up = partner.session === "SessionConfirmed";
-    const st = $("peer-state");
-    st.classList.toggle("up", up && partner.nearby);
-    st.textContent = !partner.nearby ? "Out of range"
-      : up ? "Encrypted session up" : "Setting up encryption";
+  $("channel").classList.toggle("many", shown.length > 1);
+  const crew = $("crew");
+  const keep = new Set(shown.map((p) => p.address));
+  for (const row of [...crew.children]) if (!keep.has(row.dataset.address)) row.remove();
+  if (!shown.length) {
+    crew.innerHTML = `<div class="row" data-address="">
+      <div class="lane"><div class="wire"></div><div class="badge">Looking for agents nearby</div></div>
+      <div class="node right absent"><div class="who">nobody yet</div><div class="addr"></div><div class="state"></div></div>
+    </div>`;
+    return;
   }
-  const lane = $("lane");
-  const live = !!(partner && partner.nearby && partner.session === "SessionConfirmed");
-  lane.classList.toggle("live", live);
-  const via = link === "BLE" ? "Bluetooth" : link === "LAN" ? "local network" : (link || (partner && partner.transport) || "");
-  const badge = $("badge");
-  if (!partner) badge.textContent = "Looking for an agent nearby";
-  else if (live) badge.innerHTML = `<span class="lock"></span>MLS end-to-end encrypted${via ? " over " + via : ""}`;
-  else badge.textContent = via ? `Found over ${via}` : "Found";
+  for (const p of shown) {
+    let row = laneRow(p.address);
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "row";
+      row.dataset.address = p.address;
+      row.innerHTML = `<div class="lane"><div class="wire"></div><div class="badge"></div></div>
+        <div class="node right"><div class="who"></div><div class="addr"></div><div class="state"></div></div>`;
+    }
+    crew.appendChild(row); // keeps lane order
+    row.style.setProperty("--c", colorOf(p.address));
+    row.querySelector(".who").textContent = p.name || "unknown device";
+    row.querySelector(".addr").textContent = shortAddr(p.address);
+    const up = p.session === "SessionConfirmed";
+    const live = up && p.nearby;
+    const st = row.querySelector(".state");
+    st.classList.toggle("up", live);
+    st.textContent = !p.nearby ? "Out of range" : up ? "Encrypted session up" : "Setting up encryption";
+    row.querySelector(".node").classList.toggle("absent", !p.nearby);
+    row.querySelector(".lane").classList.toggle("live", live);
+    const via = link === "BLE" ? "Bluetooth" : link === "LAN" ? "local network" : (link || p.transport || "");
+    const badge = row.querySelector(".badge");
+    if (live) badge.innerHTML = `<span class="lock"></span>MLS end-to-end encrypted${via ? " over " + via : ""}`;
+    else badge.textContent = via ? `Found over ${via}` : "Found";
+  }
 }
 
 // --- the channel ----------------------------------------------------------
 function launch(msg) {
   if (msg.kind === "hello") return;
-  const lane = $("lane");
+  const row = laneRow(msg.peer) || document.querySelector("#crew .row");
+  if (!row) return;
+  const lane = row.querySelector(".lane");
   const el = document.createElement("div");
   el.className = "packet";
   const outbound = msg.direction === "out";
@@ -298,7 +332,7 @@ function settle(msg) {
 // --- subtitles -------------------------------------------------------------
 function describe(msg) {
   const outbound = msg.direction === "out";
-  const who = outbound ? me.name : (msg.sender_name || (partner && partner.name) || "peer");
+  const who = outbound ? me.name : (msg.sender_name || msg.peer_name || "peer");
   const cls = outbound ? "me" : "peer";
   let text = msg.summary || "";
   try {
@@ -317,10 +351,17 @@ function subtitle(msg) {
   const line = $("sub-line");
   line.innerHTML = `<b class="${d.cls}"></b> <span class="v"></span>: <span class="t"></span>`;
   line.querySelector("b").textContent = d.who;
+  if (d.cls === "peer") line.querySelector("b").style.setProperty("--c", colorOf(msg.peer));
   line.querySelector(".v").textContent = d.verb;
   line.querySelector(".t").textContent = d.text;
-  if (msg.kind === "hello") line.innerHTML = `<b class="${d.cls}"></b> joined over the link`, line.querySelector("b").textContent = d.who;
-  $("sub-meta").textContent = msg.direction === "out" ? "Sent, encrypted for one recipient" : `Received over ${msg.transport === "BLE" ? "Bluetooth" : msg.transport || "the link"}, decrypted on this laptop`;
+  if (msg.kind === "hello") {
+    line.innerHTML = `<b class="${d.cls}"></b> joined over the link`;
+    line.querySelector("b").textContent = d.who;
+    line.querySelector("b").style.setProperty("--c", colorOf(msg.peer));
+  }
+  const to = msg.audience === "all" ? "everyone, encrypted for each agent" : `${msg.peer_name}, encrypted for that agent alone`;
+  $("sub-meta").textContent = msg.direction === "out" ? `Sent to ${to}`
+    : `${msg.audience === "all" ? "To everyone. " : ""}Received over ${msg.transport === "BLE" ? "Bluetooth" : msg.transport || "the link"}, decrypted on this laptop`;
 }
 
 // --- the log ---------------------------------------------------------------
@@ -340,12 +381,14 @@ function updateLog(msg) {
     li = document.createElement("li");
     li.dataset.seq = msg.seq;
     li.className = msg.direction;
-    li.innerHTML = `<span class="time"></span><span class="what"><span class="k"></span> <span class="s"></span><br><span class="st"></span></span>`;
+    li.innerHTML = `<span class="time"></span><span class="what"><span class="k"></span> <span class="to"></span> <span class="s"></span><br><span class="st"></span></span>`;
+    li.style.setProperty("--c", colorOf(msg.peer));
     ol.prepend(li);
     while (ol.children.length > 60) ol.lastChild.remove();
   }
   li.querySelector(".time").textContent = fmtTime(msg.ts);
   li.querySelector(".k").textContent = msg.kind === "game" ? "move" : msg.kind;
+  li.querySelector(".to").textContent = (msg.direction === "out" ? "→ " : "← ") + (msg.peer_name || "");
   li.querySelector(".s").textContent = msg.summary || "";
   const st = li.querySelector(".st");
   st.textContent = statusText(msg);
@@ -371,6 +414,8 @@ function renderBoard(board) {
       const owner = t.owner || "";
       const mine = owner && me.name && owner.toLowerCase() === me.name.toLowerCase();
       card.className = "task " + (owner ? (mine ? "me" : "peer") : "");
+      const c = !mine && colorByName(owner);
+      if (c) card.style.setProperty("--c", c);
       card.innerHTML = `<div class="t"></div><div class="o"></div><div class="f"></div>`;
       card.querySelector(".t").textContent = t.title || t.id;
       card.querySelector(".o").textContent = owner ? owner : "unassigned";
@@ -390,7 +435,7 @@ function renderBoard(board) {
 }
 
 async function loadBoard() {
-  if (!partner) return;
+  if (!shown.length) return;
   try {
     const r = await fetch("/api/board");
     if (r.ok) renderBoard(await r.json());
@@ -403,7 +448,7 @@ function applyState(state) {
   link = state.link;
   peers.clear();
   for (const p of state.peers) peers.set(p.address, p);
-  choosePartner();
+  choosePeers();
   $("log").innerHTML = "";
   for (const m of state.messages) updateLog(m);
   const last = [...state.messages].reverse().find((m) => m.kind !== "game");
@@ -420,13 +465,14 @@ function connect() {
     switch (ev.t) {
       case "state": applyState(ev.state); break;
       case "peer": {
-        const had = !!partner;
+        const had = shown.length > 0;
         peers.set(ev.peer.address, ev.peer);
-        choosePartner();
-        if (!had && partner) loadBoard();
+        choosePeers();
+        if (!had && shown.length) loadBoard();
         break;
       }
-      case "secure": peers.set(ev.peer.address, ev.peer); choosePartner(); break;
+      case "secure": peers.set(ev.peer.address, ev.peer); choosePeers(); break;
+      case "crew": loadBoard(); break;
       case "link": link = ev.transport; renderNodes(); break;
       case "msg": launch(ev.msg); updateLog(ev.msg); subtitle(ev.msg); break;
       case "status": settle(ev.msg); break;
