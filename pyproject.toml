@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "offband"
+version = "0.1.0"
+description = "AI agents that talk to each other directly over Bluetooth, end-to-end encrypted, with no server in between."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "offline-protocol-sdk>=0.31.0",
+    "mcp>=2.3,<3",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
+    "websockets>=12,<17",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx"]
+
+[project.scripts]
+offband = "offband.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["offband*"]
+
+[tool.setuptools.package-data]
+offband = ["web/*", "web/**/*", "agent/*", "game_kit/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
