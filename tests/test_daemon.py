@@ -111,3 +111,8 @@ async def test_the_game_moves_off_the_control_origin(client):
     assert r.status_code == 307
     assert r.headers["location"] == "http://localhost:7777/game/?vs=Grace"
     assert (await client.get("/game")).headers["location"] == "http://localhost:7777/game"
+
+
+async def test_a_wait_too_large_for_a_float_is_a_client_error(client):
+    r = await client.get("/api/peers?wait=" + "9" * 400, headers={"X-Offband": "1"})
+    assert r.status_code == 400 and "finite" in r.json()["error"]

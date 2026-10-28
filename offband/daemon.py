@@ -134,7 +134,11 @@ def _number(request: Request, name: str, default: float, kind: type = float) -> 
         value = kind(raw)
     except ValueError:
         raise NodeError(f"{name} must be a number.") from None
-    if not math.isfinite(value):  # "inf" would hold a request open for good
+    try:
+        finite = math.isfinite(value)  # "inf" would hold a request open for good
+    except OverflowError:  # an int too large for a float
+        finite = False
+    if not finite:
         raise NodeError(f"{name} must be a finite number.")
     return value
 
