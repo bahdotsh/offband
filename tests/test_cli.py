@@ -40,6 +40,8 @@ def test_allow_needs_full_addresses():
     assert cli._check_allow([ADA]) is None
     assert cli._check_allow(["off1"]) is not None
     assert cli._check_allow(["Ada"]) is not None
+    assert cli._check_allow([f"{ADA},{ADA}"]) is not None
+    assert cli._check_allow([f" {ADA}"]) is not None
 
 
 def test_fresh_tolerates_finder_metadata(tmp_path):

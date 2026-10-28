@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import shutil
 import signal
 import subprocess
@@ -113,8 +114,10 @@ def reset_home(home: Path) -> None:
 
 def _check_allow(addresses: list[str]) -> str | None:
     for address in addresses:
-        if not address.startswith("off1") or len(address) < 20:
-            return f"--allow takes a full peer address (off1...), not {address!r}"
+        # A comma- or space-joined list, a pasted "off1..." or a cut-off
+        # address would never match a peer, so the node would hear no one.
+        if not re.fullmatch(r"off1[0-9a-z]{16,}", address):
+            return f"--allow takes one full peer address (off1...) per flag, not {address!r}"
     return None
 
 
