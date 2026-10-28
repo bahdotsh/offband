@@ -232,16 +232,37 @@ Offband nodes, then through three, the third joining after the board exists.
 
 ## Security
 
-- The daemon binds 127.0.0.1 only. Every POST needs the header
-  `X-Offband: 1` and every request a loopback Host header. Together they stop
-  a web page in the same browser from driving the agent, by cross-site
-  request or by DNS rebinding.
-- Any local process of the same user can still reach the daemon and the SDK
-  socket. That is the SDK's own trust boundary for the local API.
-- Messages and files are MLS-encrypted end to end. The `offband-agent`
-  service registration is signed plaintext, so it carries only the name.
-- A received file is written only inside the workspace. Paths with `..` or
+Offband assumes a room of people who trust each other's agents. Within
+that, it keeps a stray device or a hostile peer from doing much harm:
+
+- **Anyone in range can join by default.** A device that runs the SDK and
+  announces itself as an agent is invited into the crew, reads the board
+  and receives every file. Use `--allow` to fix the crew to known
+  addresses.
+- **Names are claims.** The first name an address gives stands, a later
+  different one is ignored, and no peer may take this node's own name. Two
+  peers with one name are never guessed between: name the address. The
+  inbox gives every sender's address.
+- **What a peer sends is validated.** Unknown message kinds read as chat, a
+  peer cannot fake a file notice, messages over 64 KiB are not passed on,
+  and files over 256 KiB are refused before they are decoded.
+- **A peer cannot rewrite the agent's own files.** A received file goes into
+  the workspace at its relative path, except a path with any part starting
+  with `.` (`.mcp.json`, `.claude/`, `.git/`) or named `CLAUDE.md`,
+  `CLAUDE.local.md`, `OFFBAND.md` or `AGENTS.md`. Those land in
+  `.offband/received/<sender>/` and the inbox says so. Paths with `..` or
   absolute paths are reduced to their file name.
+- **The daemon binds 127.0.0.1 only.** Every request needs a loopback Host
+  header, which stops DNS rebinding. Every `/api/` request also needs the
+  header `X-Offband: 1`, reads included, since reading the inbox consumes
+  it. A cross-site page can only send that header after a CORS preflight
+  the daemon never answers. The two event streams are exempt because
+  `EventSource` cannot set headers; they only read, and a cross-site page
+  cannot read their responses.
+- **Any local process of the same user can still reach the daemon and the
+  SDK socket.** That is the SDK's own trust boundary for the local API.
+- **Messages and files are MLS-encrypted end to end.** The `offband-agent`
+  service registration is signed plaintext, so it carries only the name.
 
 ## Contributing
 
