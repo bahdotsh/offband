@@ -4,6 +4,10 @@ service's Unix socket (docs/spec/local-api.md in the SDK).
 One connection, one application id. Responses resolve the matching call;
 events (notifications with ``method == "event"``) go to the ``on_event``
 callback in the order the service sent them.
+
+The reader task only routes frames. Events are handed to a separate
+dispatcher task, so an event handler may itself call the API: its response
+is read by the reader while the handler waits on it.
 """
 
 from __future__ import annotations
@@ -20,9 +24,11 @@ logger = logging.getLogger(__name__)
 
 EventHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
 
-# send_file carries the bytes base64 inside one request. The service raises
-# its own inbound limit; ours only has to fit the files Offband allows.
-MAX_FRAME = 8 * 1024 * 1024
+# The service's own inbound frame limit (offline_protocol_sdk.local_api
+# MAX_MESSAGE_SIZE): its 100 MiB file limit as base64, plus 1 MiB. Our limit
+# must be at least as large, or one large file from any peer closes this
+# connection. Offband enforces its own, much smaller, file limit in code.
+MAX_FRAME = 100 * 1024 * 1024 * 4 // 3 + 1024 * 1024
 
 
 class RpcError(Exception):
@@ -45,6 +51,8 @@ class LocalApi:
         self._ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader: asyncio.Task[None] | None = None
+        self._dispatcher: asyncio.Task[None] | None = None
+        self._events: asyncio.Queue[dict[str, Any] | None] | None = None
         self.closed = asyncio.Event()
 
     async def connect(self, timeout: float = 60.0) -> dict[str, Any]:
@@ -60,27 +68,30 @@ class LocalApi:
                     raise
                 await asyncio.sleep(0.5)
         self.closed.clear()
-        self._reader = asyncio.create_task(self._read())
+        self._events = asyncio.Queue()
+        self._dispatcher = asyncio.create_task(self._dispatch(self._events))
+        self._reader = asyncio.create_task(self._read(self._events))
         hello = await self.call("hello", {"app_id": self.app_id, "client": self.client_name})
         self.local_address = hello.get("local_address")
         return hello
 
-    async def _read(self) -> None:
+    async def _read(self, events: asyncio.Queue[dict[str, Any] | None]) -> None:
         reason = "connection closed"
         try:
             async for raw in self._ws:
-                message = json.loads(raw)
+                try:
+                    message = json.loads(raw)
+                except ValueError:
+                    logger.warning("dropped a frame that is not JSON")
+                    continue
+                if not isinstance(message, dict):
+                    continue
                 if "id" in message:
                     waiter = self._pending.pop(message["id"], None)
                     if waiter is not None and not waiter.done():
                         waiter.set_result(message)
-                elif message.get("method") == "event" and self.on_event is not None:
-                    try:
-                        result = self.on_event(message["params"])
-                        if asyncio.iscoroutine(result):
-                            await result
-                    except Exception:  # one bad handler must not stop the stream
-                        logger.exception("event handler failed for %s", message["params"].get("type"))
+                elif message.get("method") == "event" and isinstance(message.get("params"), dict):
+                    events.put_nowait(message["params"])
         except Exception as exc:
             reason = f"connection closed: {exc}"
         finally:
@@ -88,23 +99,42 @@ class LocalApi:
                 if not waiter.done():
                     waiter.set_exception(ConnectionError(reason))
             self._pending.clear()
+            events.put_nowait(None)
             self.closed.set()
 
+    async def _dispatch(self, events: asyncio.Queue[dict[str, Any] | None]) -> None:
+        while True:
+            event = await events.get()
+            if event is None:
+                return
+            if self.on_event is None:
+                continue
+            try:
+                result = self.on_event(event)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:  # one bad handler must not stop the stream
+                logger.exception("event handler failed for %s", event.get("type"))
+
     async def call(self, method: str, params: dict[str, Any] | None = None, timeout: float = 60.0) -> Any:
-        if self._ws is None:
+        if self._ws is None or self.closed.is_set():
             raise ConnectionError("not connected")
         request_id = next(self._ids)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
-        await self._ws.send(json.dumps(payload))
-        response = await asyncio.wait_for(future, timeout)
+        try:
+            await self._ws.send(json.dumps(payload))
+            response = await asyncio.wait_for(future, timeout)
+        finally:
+            self._pending.pop(request_id, None)
         if "error" in response:
             raise RpcError(response["error"])
-        return response["result"]
+        return response.get("result")
 
     async def close(self) -> None:
         if self._ws is not None:
             await self._ws.close()
-        if self._reader is not None:
-            await asyncio.gather(self._reader, return_exceptions=True)
+        tasks = [t for t in (self._reader, self._dispatcher) if t is not None]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
