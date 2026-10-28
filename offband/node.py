@@ -7,10 +7,19 @@ board, received files, and the game channel.
 
 Every message between agents is one JSON envelope inside an ordinary 1:1
 SDK message, so it travels over the MLS session the engine sets up with the
-peer. Nothing here uses service request bodies for content: those are signed
-plaintext, and services are used for discovery only.
+peer. A message to everyone is one such message per agent. Nothing here uses
+service request bodies for content: those are signed plaintext, and services
+are used for discovery only.
 
-    {"ob": 1, "kind": "propose", "from": "Ada", "body": ...}
+    {"ob": 1, "kind": "propose", "from": "Ada", "to": "all", "body": ...}
+
+The agents nearby form a crew: one MLS group whose space holds the shared
+board, so every member edits the same replicated document however many
+there are. The agent with the lowest address creates it shortly after it
+hears another agent; after that the member with the lowest address among
+those nearby invites any agent that turns up. Two agents that each thought
+they were lowest (each had heard only part of the room) make two crews;
+every node then picks the same one, and moves what it wrote into it.
 """
 
 from __future__ import annotations
@@ -34,6 +43,8 @@ logger = logging.getLogger(__name__)
 ENVELOPE_VERSION = 1
 SERVICE_ID = "offband-agent"
 BOARD_DOC = "board"
+CREW_NAME = "offband-crew"
+EVERYONE = ("all", "everyone", "crew")
 
 # What an agent may say. "hello" and "game" are the node's own; the rest are
 # the agent protocol (see offband/agent/OFFBAND.md).
@@ -45,6 +56,8 @@ SYSTEM_KINDS = ("hello", "game", "file")
 MAX_FILE_BYTES = 256 * 1024
 MAX_BODY_CHARS = 16 * 1024
 HELLO_SESSION_WAIT = 4.0
+CREW_WAIT = 20.0
+CREW_SETTLE = 2.5  # lets the room fill in before the creator picks it
 LOG_LIMIT = 2000
 
 
@@ -104,6 +117,7 @@ class Entry:
     latency_ms: int | None = None
     sender_name: str | None = None
     cipher: str | None = None  # what went over the air, as the SDK reported it
+    audience: str | None = None  # "all" when it went to every agent
 
     def view(self) -> dict[str, Any]:
         return asdict(self)
@@ -142,6 +156,9 @@ class Node:
         self._game_listeners: list[Callable[[dict[str, Any]], None]] = []
         self._tasks: set[asyncio.Task[Any]] = set()
         self.link_transport: str | None = None
+        self.crew: str | None = None  # the crew's group id
+        self.crew_members: list[str] = []
+        self._crew_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ setup
 
@@ -152,6 +169,7 @@ class Node:
         await self.api.call("subscribe", {"types": "all"})
         await self.announce({})
         await self._snapshot_neighbors()
+        await self._load_crew()
 
     async def _snapshot_neighbors(self) -> None:
         """Peers the engine already knows about before our events started."""
@@ -259,16 +277,16 @@ class Node:
             if peer:
                 peer.hello_sent = False
 
-    async def list_peers(self, wait_seconds: float = 0.0) -> list[dict[str, Any]]:
+    async def list_peers(self, wait_seconds: float = 0.0, min_agents: int = 1) -> list[dict[str, Any]]:
         """Nearby peers, agents first. With ``wait_seconds``, waits until at
-        least one agent is known and its session is confirmed."""
+        least ``min_agents`` agents are known with their sessions confirmed."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, wait_seconds)
         while True:
             await self._refresh_sessions()
             ready = [p for p in self.peers.values() if p.is_agent and p.session == "SessionConfirmed"]
             remaining = deadline - loop.time()
-            if ready or remaining <= 0:
+            if len(ready) >= max(1, min_agents) or remaining <= 0:
                 break
             async with self._changed:
                 try:
@@ -288,10 +306,24 @@ class Node:
                 peer.session = state
                 self._emit({"t": "peer", "peer": peer.view()})
 
+    def agents(self) -> list[Peer]:
+        return sorted((p for p in self.peers.values() if p.is_agent), key=lambda p: p.address)
+
+    def resolve_recipients(self, peer: str | None) -> list[str]:
+        """Every agent for nothing or "all"; otherwise the one peer named."""
+        if peer and peer.lower() not in EVERYONE + ("partner", "peer"):
+            return [self.resolve_peer(peer)]
+        agents = self.agents()
+        if agents:
+            return [p.address for p in agents]
+        if len(self.peers) == 1:
+            return [next(iter(self.peers))]
+        raise NodeError("No agent is nearby yet. Call peers(wait_seconds=30) and try again.")
+
     def resolve_peer(self, peer: str | None) -> str:
         """An address from a name, an address, a prefix, or nothing (the one
         agent nearby)."""
-        agents = [p for p in self.peers.values() if p.is_agent]
+        agents = self.agents()
         if not peer or peer in ("partner", "peer"):
             if len(agents) == 1:
                 return agents[0].address
@@ -320,8 +352,13 @@ class Node:
 
     # --------------------------------------------------------------- messages
 
-    async def _send_envelope(self, address: str, kind: str, body: Any, log: bool = True) -> Entry | None:
-        content = json.dumps({"ob": ENVELOPE_VERSION, "kind": kind, "from": self.name, "body": body})
+    async def _send_envelope(
+        self, address: str, kind: str, body: Any, log: bool = True, audience: str | None = None
+    ) -> Entry | None:
+        envelope = {"ob": ENVELOPE_VERSION, "kind": kind, "from": self.name, "body": body}
+        if audience:
+            envelope["to"] = audience
+        content = json.dumps(envelope)
         message_id = await self.api.call(
             "send_message", {"recipient": address, "content": content, "priority": "High" if kind == "game" else "Medium"}
         )
@@ -330,7 +367,7 @@ class Node:
         entry = Entry(
             seq=next(self._seq), direction="out", peer=address, kind=kind, body=body, ts=time.time(),
             message_id=message_id, status="sent", sender_name=self.name,
-            cipher=self._ciphers.pop(message_id, None),
+            cipher=self._ciphers.pop(message_id, None), audience=audience,
         )
         self._append(entry)
         self._by_message_id[message_id] = entry
@@ -343,11 +380,26 @@ class Node:
             raise NodeError(f"Message too long ({len(body)} chars, max {MAX_BODY_CHARS}). Send code with send_file.")
         if not isinstance(body, str) and len(json.dumps(body)) > MAX_BODY_CHARS:
             raise NodeError(f"Message too long (max {MAX_BODY_CHARS} chars as JSON). Send code with send_file.")
-        address = self.resolve_peer(peer)
-        entry = await self._send_envelope(address, kind, body)
-        assert entry is not None
-        await self._await_status(entry, wait_delivery)
-        return self._outcome(entry)
+        addresses = self.resolve_recipients(peer)
+        audience = "all" if len(addresses) > 1 else None
+        entries = []
+        for address in addresses:
+            entry = await self._send_envelope(address, kind, body, audience=audience)
+            assert entry is not None
+            entries.append(entry)
+        await asyncio.gather(*(self._await_status(e, wait_delivery) for e in entries))
+        return self._outcomes(entries)
+
+    def _outcomes(self, entries: list[Entry]) -> dict[str, Any]:
+        """One recipient reads as before; several as one result per agent."""
+        if len(entries) == 1:
+            return self._outcome(entries[0])
+        deliveries = []
+        for entry in entries:
+            result = self._outcome(entry)
+            result.pop("kind", None)
+            deliveries.append(result)
+        return {"to": "everyone", "kind": entries[0].kind, "deliveries": deliveries}
 
     async def _await_status(self, entry: Entry, timeout: float) -> None:
         loop = asyncio.get_running_loop()
@@ -429,6 +481,7 @@ class Node:
         for e in fresh:
             item = {
                 "from": e.sender_name or self.peer_name(e.peer),
+                "to": "everyone" if e.audience == "all" else "you",
                 "kind": e.kind,
                 "body": e.body,
                 "transport": e.transport,
@@ -440,7 +493,7 @@ class Node:
     # ------------------------------------------------------------------ files
 
     async def send_file(self, peer: str | None, path: str) -> dict[str, Any]:
-        address = self.resolve_peer(peer)
+        addresses = self.resolve_recipients(peer)
         source = Path(path)
         if not source.is_absolute():
             if self.workspace is None:
@@ -453,19 +506,22 @@ class Node:
         if len(data) > MAX_FILE_BYTES:
             raise NodeError(f"{source.name} is {len(data)} bytes; the limit is {MAX_FILE_BYTES}. Send source, not assets.")
         relative = self._relative(source)
-        file_id = await self.api.call(
-            "send_file",
-            {"recipient": address, "file_data": base64.b64encode(data).decode(), "file_name": quote(relative, safe="")},
-        )
-        entry = Entry(
-            seq=next(self._seq), direction="out", peer=address, kind="file",
-            body={"path": relative, "bytes": len(data)}, ts=time.time(), message_id=file_id,
-            status="sent", sender_name=self.name,
-        )
-        self._append(entry)
-        self._file_entries[file_id] = entry
-        await self._await_status(entry, 8.0)
-        result = self._outcome(entry)
+        encoded = base64.b64encode(data).decode()
+        entries = []
+        for address in addresses:
+            file_id = await self.api.call(
+                "send_file", {"recipient": address, "file_data": encoded, "file_name": quote(relative, safe="")}
+            )
+            entry = Entry(
+                seq=next(self._seq), direction="out", peer=address, kind="file",
+                body={"path": relative, "bytes": len(data)}, ts=time.time(), message_id=file_id,
+                status="sent", sender_name=self.name, audience="all" if len(addresses) > 1 else None,
+            )
+            self._append(entry)
+            self._file_entries[file_id] = entry
+            entries.append(entry)
+        await asyncio.gather(*(self._await_status(e, 8.0) for e in entries))
+        result = self._outcomes(entries)
         result["path"] = relative
         result["bytes"] = len(data)
         return result
@@ -496,12 +552,178 @@ class Node:
         target.write_bytes(data)
         return relative, target
 
+    # ------------------------------------------------------------------- crew
+
+    async def _load_crew(self) -> None:
+        """Adopts the crew group this node belongs to. When there are two,
+        every node picks the same one: the most members, then the lowest
+        group id (creation times are local to each node)."""
+        try:
+            group_ids = await self.api.call("list_groups")
+        except (RpcError, ConnectionError):
+            return
+        best: tuple[Any, ...] | None = None
+        for group_id in group_ids or []:
+            gid = group_id if isinstance(group_id, str) else (group_id or {}).get("group_id")
+            if not gid:
+                continue
+            try:
+                info = await self.api.call("get_group_info", {"group_id": gid})
+            except (RpcError, ConnectionError):
+                continue
+            if not info or info.get("name") != CREW_NAME or self.address not in (info.get("members") or []):
+                continue
+            members = list(info.get("members") or [])
+            key = (-len(members), gid, members)
+            if best is None or key[:2] < best[:2]:
+                best = key
+        if best is None:
+            return
+        _, gid, members = best
+        changed = gid != self.crew or members != self.crew_members
+        previous = self.crew
+        self.crew, self.crew_members = gid, members
+        if previous is not None and previous != gid:
+            self._spawn(self._move_board(previous, gid))
+        elif previous != gid:
+            self._board_dirty = True
+            self._spawn(self._push_board())
+        if changed:
+            self._emit({"t": "crew", "crew": self.crew_view()})
+            self._spawn(self._grow_crew())  # we may be the one to invite
+            await self._notify()
+
+    async def _join_crew(self, group_id: str) -> None:
+        """After an invitation the group can take a moment to list us."""
+        for _ in range(10):
+            await self._load_crew()
+            if self.crew == group_id or (self.crew and group_id not in (await self._crew_ids())):
+                return
+            await asyncio.sleep(1.0)
+
+    async def _crew_ids(self) -> list[str]:
+        try:
+            return [g if isinstance(g, str) else (g or {}).get("group_id") for g in await self.api.call("list_groups")]
+        except (RpcError, ConnectionError):
+            return []
+
+    async def _move_board(self, old: str, new: str) -> None:
+        """Copies what the old crew's board holds and the new one lacks."""
+        try:
+            raw = json.loads(await self.api.call("data.doc_json", {"space_id": old, "doc_id": BOARD_DOC}))
+            space = {"space_id": new, "doc_id": BOARD_DOC}
+            await self.api.call("data.create_doc", space)
+            current = json.loads(await self.api.call("data.doc_json", space))
+            moved = 0
+            for collection in ("tasks", "notes"):
+                have = current.get(collection) or {}
+                for key, value in (raw.get(collection) or {}).items():
+                    if key in have:
+                        continue
+                    await self.api.call("data.map_set", {**space, "collection": collection, "key": key,
+                                                         "value_json": json.dumps({"kind": "text", "value": value})})
+                    moved += 1
+            if moved:
+                await self.api.call("data.flush", space)
+        except (RpcError, ConnectionError, ValueError) as exc:
+            logger.info("board not moved to the new crew: %s", exc)
+        self._board_dirty = True
+        await self._push_board()
+        await self._notify()
+
+    def _inviter(self) -> bool:
+        """The crew member with the lowest address among those nearby
+        invites newcomers, so two members never commit the same add."""
+        nearby = [a for a in self.crew_members if a == self.address or (a in self.peers and self.peers[a].nearby)]
+        return bool(nearby) and min(nearby) == self.address
+
+    async def _ensure_crew(self, create: bool) -> str | None:
+        async with self._crew_lock:
+            if self.crew is None:
+                await self._load_crew()
+            if self.crew is None:
+                if not create:
+                    return None
+                if not self.agents():
+                    raise NodeError("No agent is nearby yet. Call peers(wait_seconds=30) and try again.")
+                info = await self.api.call("create_group", {"group_name": CREW_NAME})
+                self.crew = info["group_id"]
+                self.crew_members = list(info.get("members") or [self.address])
+                self._emit({"t": "crew", "crew": self.crew_view()})
+            if self._inviter():
+                await self._invite_missing()
+            return self.crew
+
+    async def _invite_missing(self) -> None:
+        assert self.crew is not None
+        added = False
+        for peer in self.agents():
+            if peer.address in self.crew_members:
+                continue
+            if peer.session != "SessionConfirmed":
+                try:
+                    peer.session = await self.api.call("get_establishment_state", {"peer_id": peer.address})
+                except (RpcError, ConnectionError):
+                    continue
+                if peer.session != "SessionConfirmed":
+                    continue  # invited once its session is up
+            try:
+                await self.api.call("invite_to_group", {"group_id": self.crew, "invitee_user_id": peer.address})
+                self.crew_members.append(peer.address)
+                added = True
+            except (RpcError, ConnectionError) as exc:
+                logger.info("crew invite to %s not sent yet: %s", short(peer.address), exc)
+        if added:
+            self._emit({"t": "crew", "crew": self.crew_view()})
+
+    def _creator(self) -> bool:
+        """Before there is a crew, the agent with the lowest address makes it."""
+        return all((self.address or "") < p.address for p in self.agents())
+
+    async def _grow_crew(self) -> None:
+        if self.crew is None:
+            if not self._creator():
+                return  # the creator invites us
+            await asyncio.sleep(CREW_SETTLE)
+            if self.crew is None and not self._creator():
+                return
+        try:
+            await self._ensure_crew(create=True)
+        except (RpcError, NodeError, ConnectionError) as exc:
+            logger.info("crew not grown yet: %s", exc)
+
+    async def _await_crew(self) -> None:
+        """An edit before the crew's invitation arrives waits for it a
+        while, then makes a crew itself (the creator may be gone)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CREW_WAIT
+        while self.crew is None and not self._creator():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            async with self._changed:
+                try:
+                    await asyncio.wait_for(self._changed.wait(), min(remaining, 1.0))
+                except asyncio.TimeoutError:
+                    pass
+            await self._load_crew()
+
+    def crew_view(self) -> dict[str, Any] | None:
+        if self.crew is None:
+            return None
+        return {"id": self.crew, "members": [self.name if a == self.address else self.peer_name(a)
+                                             for a in self.crew_members]}
+
     # ------------------------------------------------------------------ board
 
-    async def board_get(self, peer: str | None = None) -> dict[str, Any]:
-        address = self.resolve_peer(peer)
-        await self.api.call("data.create_doc", {"space_id": address, "doc_id": BOARD_DOC})
-        raw = json.loads(await self.api.call("data.doc_json", {"space_id": address, "doc_id": BOARD_DOC}))
+    async def board_get(self) -> dict[str, Any]:
+        crew = await self._ensure_crew(create=False)
+        if crew is None:
+            return {"crew": [], "notes": {}, "tasks": [],
+                    "note": "No board yet. The lead's first board_update creates it for every agent nearby."}
+        space = {"space_id": crew, "doc_id": BOARD_DOC}
+        await self.api.call("data.create_doc", space)
+        raw = json.loads(await self.api.call("data.doc_json", space))
         tasks = []
         for key, value in (raw.get("tasks") or {}).items():
             try:
@@ -512,22 +734,24 @@ class Node:
             tasks.append(task)
         tasks.sort(key=lambda t: (str(t.get("order", "")).zfill(4), t["id"]))
         notes = {k: v for k, v in (raw.get("notes") or {}).items()}
-        return {"with": self.peer_name(address), "notes": notes, "tasks": tasks}
+        view = self.crew_view() or {}
+        return {"crew": view.get("members", []), "notes": notes, "tasks": tasks}
 
     async def board_update(
         self,
-        peer: str | None = None,
         tasks: list[dict[str, Any]] | None = None,
         notes: dict[str, str] | None = None,
         remove: list[str] | None = None,
     ) -> dict[str, Any]:
         """Merges task fields by id and sets notes. Each task id is its own
-        key, so two agents editing different tasks never collide; the same
-        task edited on both sides resolves last write wins."""
-        address = self.resolve_peer(peer)
-        space = {"space_id": address, "doc_id": BOARD_DOC}
+        key, so agents editing different tasks never collide; the same task
+        edited on two sides resolves last write wins."""
+        await self._await_crew()
+        crew = await self._ensure_crew(create=True)
+        assert crew is not None
+        space = {"space_id": crew, "doc_id": BOARD_DOC}
         await self.api.call("data.create_doc", space)
-        current = {t["id"]: t for t in (await self.board_get(address))["tasks"]}
+        current = {t["id"]: t for t in (await self.board_get())["tasks"]}
         for patch in tasks or []:
             if "id" not in patch or not str(patch["id"]).strip():
                 raise NodeError("Every task needs an id, e.g. {\"id\": \"rules\", \"title\": ..., \"owner\": ...}.")
@@ -549,7 +773,7 @@ class Node:
         for task_id in remove or []:
             await self.api.call("data.map_delete", {**space, "collection": "tasks", "key": task_id})
         await self.api.call("data.flush", space)
-        board = await self.board_get(address)
+        board = await self.board_get()
         self._emit({"t": "board", "board": board, "by": self.name})
         return board
 
@@ -561,16 +785,23 @@ class Node:
         assert entry is not None
         return {"message_id": entry.message_id}
 
-    def game_info(self) -> dict[str, Any]:
+    def game_info(self, vs: str | None = None) -> dict[str, Any]:
+        """The opponent is the one named by ``vs``, or the only agent
+        nearby; with several and none named, ``peer`` is null and the page
+        offers ``agents`` to choose from."""
         try:
-            partner = self.resolve_peer(None)
+            opponent = self.resolve_peer(vs)
         except NodeError:
-            partner = None
-        info: dict[str, Any] = {"me": {"name": self.name, "address": self.address}, "peer": None}
-        if partner:
-            info["peer"] = {"name": self.peer_name(partner), "address": partner}
+            opponent = None
+        info: dict[str, Any] = {
+            "me": {"name": self.name, "address": self.address},
+            "peer": None,
+            "agents": [{"name": self.peer_name(p.address), "address": p.address} for p in self.agents()],
+        }
+        if opponent:
+            info["peer"] = {"name": self.peer_name(opponent), "address": opponent}
             # A fixed, symmetric rule both sides compute the same way.
-            info["first"] = (self.address or "") < partner
+            info["first"] = (self.address or "") < opponent
         return info
 
     # ----------------------------------------------------------------- events
@@ -610,6 +841,8 @@ class Node:
             peer.session = "SessionConfirmed"
             self._emit({"t": "peer", "peer": peer.view()})
             self._emit({"t": "secure", "peer": peer.view()})
+            if peer.is_agent:
+                self._spawn(self._grow_crew())
 
     async def _ev_message_sent(self, event: dict[str, Any]) -> None:
         # Emitted inside send_message, before it returns the id, so the entry
@@ -678,8 +911,9 @@ class Node:
             kind = str(envelope.get("kind"))
             body = envelope.get("body")
             sender_name = envelope.get("from")
+            audience = "all" if envelope.get("to") == "all" else None
         except ValueError:
-            kind, body, sender_name = "chat", event.get("content"), None
+            kind, body, sender_name, audience = "chat", event.get("content"), None, None
         if isinstance(sender_name, str) and sender_name:
             if peer.name != sender_name:
                 peer.name = sender_name
@@ -689,13 +923,13 @@ class Node:
             return
         entry = Entry(
             seq=next(self._seq), direction="in", peer=sender, kind=kind, body=body, ts=time.time(),
-            message_id=message_id, transport=transport, sender_name=peer.name,
+            message_id=message_id, transport=transport, sender_name=peer.name, audience=audience,
         )
         self._append(entry)
         if kind == "game":
             for fn in list(self._game_listeners):
                 try:
-                    fn({"from": peer.name, "payload": body})
+                    fn({"from": peer.name, "address": sender, "payload": body})
                 except Exception:
                     logger.exception("game listener failed")
 
@@ -708,6 +942,7 @@ class Node:
         self._emit({"t": "peer", "peer": peer.view()})
         if body.get("want_reply"):
             self._spawn(self._send_hello(peer.address, want_reply=False))
+        self._spawn(self._grow_crew())
         if first_time:
             entry = Entry(
                 seq=next(self._seq), direction="in", peer=peer.address, kind="hello",
@@ -751,19 +986,27 @@ class Node:
     async def _ev_data_changed(self, event: dict[str, Any]) -> None:
         if event.get("doc_id") != BOARD_DOC:
             return
-        space = event.get("space_id")
-        if isinstance(space, str) and space in self.peers:
+        if self.crew is not None and event.get("space_id") == self.crew:
             self._board_dirty = True
             # Never call the API from inside the event reader: the response
             # would be read by the task that is waiting for it.
-            self._spawn(self._push_board(space))
+            self._spawn(self._push_board())
 
-    async def _push_board(self, space: str) -> None:
+    async def _ev_group_member_added(self, event: dict[str, Any]) -> None:
+        # An invitation to a crew, or a newcomer in ours.
+        group_id = event.get("group_id")
+        if isinstance(group_id, str):
+            self._spawn(self._join_crew(group_id))
+
+    async def _ev_group_member_removed(self, event: dict[str, Any]) -> None:
+        self._spawn(self._load_crew())
+
+    async def _push_board(self) -> None:
         try:
-            board = await self.board_get(space)
+            board = await self.board_get()
         except (RpcError, NodeError, ConnectionError):
             return
-        self._emit({"t": "board", "board": board, "by": self.peer_name(space)})
+        self._emit({"t": "board", "board": board})
 
     def _set_link(self, transport: str | None) -> None:
         if transport and transport != self.link_transport:
@@ -776,6 +1019,7 @@ class Node:
         return {
             "me": {"name": self.name, "address": self.address, "workspace": str(self.workspace) if self.workspace else None},
             "link": self.link_transport,
+            "crew": self.crew_view(),
             "peers": [p.view() for p in self.peers.values()],
             "messages": [self._radar_view(e) for e in self.log[-300:]],
         }

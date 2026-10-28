@@ -138,8 +138,10 @@ def build_app(node: Node, game_dir: Path | None = None) -> Starlette:
     async def peers(request: Request) -> Response:
         try:
             wait = float(request.query_params.get("wait", "0"))
+            min_agents = int(request.query_params.get("min_agents", "1"))
             return JSONResponse({"me": {"name": node.name, "address": node.address},
-                                 "peers": await node.list_peers(wait)})
+                                 "peers": await node.list_peers(wait, min_agents),
+                                 "crew": node.crew_view()})
         except Exception as exc:
             return _error(exc)
 
@@ -161,10 +163,9 @@ def build_app(node: Node, game_dir: Path | None = None) -> Starlette:
     async def board(request: Request) -> Response:
         try:
             if request.method == "GET":
-                return JSONResponse(await node.board_get(request.query_params.get("peer")))
+                return JSONResponse(await node.board_get())
             body = await _json(request)
-            return JSONResponse(await node.board_update(
-                body.get("peer"), body.get("tasks"), body.get("notes"), body.get("remove")))
+            return JSONResponse(await node.board_update(body.get("tasks"), body.get("notes"), body.get("remove")))
         except Exception as exc:
             return _error(exc)
 
@@ -185,13 +186,16 @@ def build_app(node: Node, game_dir: Path | None = None) -> Starlette:
         except Exception as exc:
             return _error(exc)
 
-    async def game_info(_: Request) -> Response:
-        return JSONResponse(node.game_info())
+    async def game_info(request: Request) -> Response:
+        return JSONResponse(node.game_info(request.query_params.get("vs")))
 
     async def game_send(request: Request) -> Response:
         try:
             body = await _json(request)
-            return JSONResponse(await node.game_send(body))
+            payload = body.get("payload")
+            if not isinstance(payload, dict) or not body.get("peer"):
+                raise NodeError("Send {\"peer\": <opponent address>, \"payload\": {...}}.")
+            return JSONResponse(await node.game_send(payload, str(body["peer"])))
         except Exception as exc:
             return _error(exc)
 

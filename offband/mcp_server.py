@@ -17,12 +17,13 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 INSTRUCTIONS = """\
-Offband connects you to other coding agents nearby, over Bluetooth, end-to-end
-encrypted (MLS), with no server in between. Everything you send reaches only
-the peer you name.
+Offband connects you to the other coding agents nearby, however many there
+are, over Bluetooth, end-to-end encrypted (MLS), with no server in between.
+A message goes to every agent unless you name one peer; then only that peer
+can read it.
 
-Typical flow: announce, then peers(wait_seconds=30) to find your partner.
-Plan on the shared board (board_update), agree with propose/accept messages,
+Typical flow: announce, then peers(wait_seconds=30) to find the others.
+Plan on the board every agent shares (board_update), agree with propose/accept messages,
 send the files you own with send_file, and wait for replies with
 inbox(wait_seconds=...) instead of polling in a loop. Keep messages short:
 they show on the radar screen as they fly between the machines.
@@ -61,13 +62,14 @@ async def _call(method: str, path: str, body: dict[str, Any] | None = None, time
 
 
 @server.tool()
-async def peers(wait_seconds: float = 0) -> dict[str, Any]:
+async def peers(wait_seconds: float = 0, min_agents: int = 1) -> dict[str, Any]:
     """List nearby devices and agents: name, address, transport (BLE or LAN),
     signal strength, and whether the encrypted session is up
-    (session == "SessionConfirmed"). With wait_seconds > 0, waits until at
-    least one agent is ready."""
+    (session == "SessionConfirmed"), plus the crew that shares the board.
+    With wait_seconds > 0, waits until at least min_agents agents are ready."""
     wait = max(0.0, min(float(wait_seconds), 120.0))
-    return await _call("GET", f"/api/peers?wait={wait}", timeout=wait + 15)
+    count = max(1, int(min_agents))
+    return await _call("GET", f"/api/peers?wait={wait}&min_agents={count}", timeout=wait + 15)
 
 
 @server.tool()
@@ -77,11 +79,13 @@ async def send(kind: str, body: Any, peer: str | None = None) -> dict[str, Any]:
     kind: propose | accept | counter | task | review | question | chat | done
     body: a short string, or a small JSON object (max 16 KiB). Code goes in
           files, with send_file, never in a message.
-    peer: the agent's name or address; omit when there is one partner.
+    peer: one agent's name or address for a direct message; omit (or "all")
+          to send to every agent nearby.
 
-    Waits a few seconds for the peer's acknowledgement and reports
-    status "delivered" with the transport and latency, or "sent" when the SDK
-    is still retrying (it keeps retrying; no need to resend)."""
+    Waits a few seconds for each acknowledgement and reports status
+    "delivered" with the transport and latency, or "sent" when the SDK is
+    still retrying (it keeps retrying; no need to resend). Sent to several
+    agents, the result lists one delivery per agent."""
     return await _call("POST", "/api/send", {"peer": peer, "kind": kind, "body": body})
 
 
@@ -89,19 +93,20 @@ async def send(kind: str, body: Any, peer: str | None = None) -> dict[str, Any]:
 async def inbox(wait_seconds: float = 60) -> dict[str, Any]:
     """New messages from other agents since the last call (each returned
     once). Blocks up to wait_seconds for the first one, so call it instead of
-    sleeping. Also reports board_changed when the partner edited the board.
-    File transfers appear as kind "file" with the path they were saved to."""
+    sleeping. Each message says who it is from and whether it went to
+    "everyone" or only to "you". Also reports board_changed when another
+    agent edited the board. File transfers appear as kind "file" with the
+    path they were saved to."""
     wait = max(0.0, min(float(wait_seconds), 300.0))
     return await _call("GET", f"/api/inbox?wait={wait}", timeout=wait + 15)
 
 
 @server.tool()
-async def board_get(peer: str | None = None) -> dict[str, Any]:
-    """Read the task board shared with your partner: notes (plan, contract)
-    and tasks (id, title, owner, status, files). Both agents hold a replica
-    and edits merge over the link."""
-    query = f"?peer={peer}" if peer else ""
-    return await _call("GET", f"/api/board{query}")
+async def board_get() -> dict[str, Any]:
+    """Read the task board every agent in the crew shares: notes (plan,
+    contract) and tasks (id, title, owner, status, files). Each agent holds a
+    replica and edits merge over the link."""
+    return await _call("GET", "/api/board")
 
 
 @server.tool()
@@ -109,22 +114,24 @@ async def board_update(
     tasks: list[dict[str, Any]] | None = None,
     notes: dict[str, str] | None = None,
     remove: list[str] | None = None,
-    peer: str | None = None,
 ) -> dict[str, Any]:
     """Edit the shared board. tasks: a list of task patches merged by id,
     e.g. [{"id": "engine", "title": "Game rules", "owner": "Ada",
     "status": "doing", "files": ["game/engine.js"]}]. Status is one of
     todo | doing | review | done. notes: named text blocks such as "plan" or
     "contract" (whole value replaced). remove: task ids to delete.
-    Edit only tasks you own, except to claim one the plan gave you."""
-    return await _call("POST", "/api/board", {"peer": peer, "tasks": tasks, "notes": notes, "remove": remove})
+    Edit only tasks you own, except to claim one the plan gave you.
+    The first edit creates the crew: every agent nearby joins the board, and
+    agents that turn up later join it by themselves."""
+    return await _call("POST", "/api/board", {"tasks": tasks, "notes": notes, "remove": remove})
 
 
 @server.tool()
 async def send_file(path: str, peer: str | None = None) -> dict[str, Any]:
-    """Send one file (max 256 KiB) to your partner, encrypted. A path relative
-    to the workspace keeps its place: the partner receives it at the same
-    relative path in their workspace. Send only files you own."""
+    """Send one file (max 256 KiB), encrypted, to every agent nearby, or to
+    the one peer named. A path relative to the workspace keeps its place:
+    each agent receives it at the same relative path in its workspace. Send
+    only files you own."""
     return await _call("POST", "/api/send_file", {"peer": peer, "path": path}, timeout=60)
 
 
