@@ -161,8 +161,11 @@ class LocalApi:
         finally:
             self._pending.pop(request_id, None)
         if "error" in response:
-            raise RpcError(response["error"])
-        return response.get("result")
+            error = response["error"]
+            raise RpcError(error if isinstance(error, dict) else {"message": str(error)})
+        if "result" not in response:
+            raise RpcError({"message": f"the service answered {method} without a result"})
+        return response["result"]
 
     async def close(self) -> None:
         if self._ws is not None:

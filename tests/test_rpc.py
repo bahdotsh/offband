@@ -11,7 +11,7 @@ import pytest
 from websockets.asyncio.server import unix_serve
 
 from fakes import ME
-from offband.rpc import LocalApi
+from offband.rpc import LocalApi, RpcError
 
 
 async def test_an_event_handler_may_call_the_api():
@@ -72,3 +72,22 @@ def test_message_content_over_the_limit_is_shed_before_it_is_queued():
     assert big["content"] is None and big["content_chars"] == 12
     small = {"type": "message_received", "content": "hi"}
     assert api._shed(small) is small
+
+
+async def test_a_response_without_a_result_is_an_error():
+    path = Path(tempfile.mkdtemp(prefix="ob-")) / "s.sock"
+
+    async def service(ws):
+        async for raw in ws:
+            req = json.loads(raw)
+            if req["method"] == "hello":
+                await ws.send(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": {"local_address": ME}}))
+            else:
+                await ws.send(json.dumps({"jsonrpc": "2.0", "id": req["id"]}))
+
+    async with unix_serve(service, str(path)):
+        api = LocalApi(str(path), "offband")
+        await api.connect(timeout=5)
+        with pytest.raises(RpcError, match="without a result"):
+            await api.call("list_groups", timeout=5)
+        await api.close()
