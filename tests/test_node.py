@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from fakes import ADA, EVE, envelope, last, receive, receive_file
-from offband.node import MAX_FILE_BYTES, MAX_INBOUND_CHARS, NodeError
+from fakes import ADA, BOB, EVE, envelope, last, receive, receive_file
+from offband.node import MAX_FILE_BYTES, MAX_INBOUND_CHARS, NodeError, _stamp
 
 
 # ---------------------------------------------------------------- envelopes
@@ -96,3 +97,18 @@ async def test_an_oversized_file_is_refused_and_not_written(node):
     body = last(node).body
     assert body["note"].startswith("refused") and body["saved_to"] is None
     assert not (node.workspace / "big.bin").exists()
+
+
+# -------------------------------------------------------------------- crew
+
+async def test_a_newcomer_that_hears_of_a_crew_waits_to_be_invited(node):
+    node.address = "off1" + "0" * 40  # lower than everyone
+    await receive(node, ADA, envelope("hello", {"name": "Ada"}))
+    assert node._creator()
+    await receive(node, BOB, envelope("hello", {"name": "Bob", "crew": "group-1"}, name="Bob"))
+    assert not node._creator()
+
+
+def test_a_crew_merge_keeps_the_newer_task():
+    assert _stamp(json.dumps({"updated_at": 5})) > _stamp(json.dumps({"updated_at": 2}))
+    assert _stamp("not json") == 0.0 and _stamp(json.dumps({"title": "x"})) == 0.0

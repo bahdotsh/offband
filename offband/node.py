@@ -16,10 +16,11 @@ are used for discovery only.
 The agents nearby form a crew: one MLS group whose space holds the shared
 board, so every member edits the same replicated document however many
 there are. The agent with the lowest address creates it shortly after it
-hears another agent; after that the member with the lowest address among
-those nearby invites any agent that turns up. Two agents that each thought
-they were lowest (each had heard only part of the room) make two crews;
-every node then picks the same one, and moves what it wrote into it.
+hears another agent, unless an agent it hears already reports a crew; after
+that the member with the lowest address among those nearby invites any
+agent that turns up. Two agents that each thought they were lowest (each had
+heard only part of the room) make two crews; every node then picks the same
+one, and moves what it wrote into it.
 
 Everything that arrives from a peer is untrusted: a peer may run any code
 on top of the SDK. Envelopes are validated, inbound files are capped, files
@@ -137,6 +138,7 @@ class Peer:
     capabilities: dict[str, Any] = field(default_factory=dict)
     session: str | None = None
     last_seen: float = field(default_factory=time.time)
+    crew: str | None = None  # the crew this agent said it is in
     hello_sent: bool = False
 
     def view(self) -> dict[str, Any]:
@@ -317,7 +319,9 @@ class Node:
             if state == "SessionConfirmed":
                 break
             await asyncio.sleep(0.3)
-        body = {"name": self.name, "capabilities": self.capabilities, "want_reply": want_reply}
+        # The crew id tells a newcomer that a crew exists, so it waits for the
+        # invitation instead of making a second one.
+        body = {"name": self.name, "capabilities": self.capabilities, "want_reply": want_reply, "crew": self.crew}
         try:
             await self._post(address, "hello", body)
         except (RpcError, ConnectionError) as exc:
@@ -685,7 +689,8 @@ class Node:
             return []
 
     async def _move_board(self, old: str, new: str) -> None:
-        """Copies what the old crew's board holds and the new one lacks."""
+        """Copies what the old crew's board holds and the new one lacks. A
+        task on both boards keeps the edit made last."""
         try:
             raw = json.loads(await self.api.call("data.doc_json", {"space_id": old, "doc_id": BOARD_DOC}))
             space = {"space_id": new, "doc_id": BOARD_DOC}
@@ -695,7 +700,7 @@ class Node:
             for collection in ("tasks", "notes"):
                 have = current.get(collection) or {}
                 for key, value in (raw.get(collection) or {}).items():
-                    if key in have:
+                    if key in have and (collection != "tasks" or _stamp(value) <= _stamp(have[key])):
                         continue
                     await self.api.call("data.map_set", {**space, "collection": collection, "key": key,
                                                          "value_json": json.dumps({"kind": "text", "value": value})})
@@ -757,8 +762,13 @@ class Node:
             self._emit({"t": "crew", "crew": self.crew_view()})
 
     def _creator(self) -> bool:
-        """Before there is a crew, the agent with the lowest address makes it."""
-        return all((self.address or "") < p.address for p in self.agents())
+        """Before there is a crew, the agent with the lowest address makes it.
+        An agent that hears of a crew already formed waits to be invited,
+        however low its address: a second crew would only have to merge."""
+        agents = self.agents()
+        if any(p.crew for p in agents):
+            return False
+        return all((self.address or "") < p.address for p in agents)
 
     async def _grow_crew(self) -> None:
         if self.crew is None:
@@ -847,6 +857,7 @@ class Node:
             merged = {**current.get(task_id, {}), **patch}
             merged.pop("id", None)
             merged["updated_by"] = self.name
+            merged["updated_at"] = round(time.time(), 3)  # lets a crew merge keep the newer edit
             await self.api.call(
                 "data.map_set",
                 {**space, "collection": "tasks", "key": task_id,
@@ -1037,6 +1048,8 @@ class Node:
         peer.is_agent = True
         if isinstance(body.get("capabilities"), dict):
             peer.capabilities = {str(k)[:40]: str(v)[:200] for k, v in list(body["capabilities"].items())[:16]}
+        crew = body.get("crew")
+        peer.crew = crew if isinstance(crew, str) and crew else None
         self._emit({"t": "peer", "peer": peer.view()})
         if body.get("want_reply"):
             self._spawn(self._send_hello(peer.address, want_reply=False))
@@ -1155,6 +1168,15 @@ class Node:
             "peers": [p.view() for p in self.peers.values()],
             "messages": [self._radar_view(e) for e in self.log[-300:]],
         }
+
+
+def _stamp(value: Any) -> float:
+    """When a board task was last edited, from its stored JSON; 0 if unknown."""
+    try:
+        task = json.loads(value) if isinstance(value, str) else value
+        return float(task.get("updated_at") or 0)
+    except (ValueError, TypeError, AttributeError):
+        return 0.0
 
 
 def _trim_event(event: dict[str, Any]) -> dict[str, Any]:
