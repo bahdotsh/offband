@@ -148,7 +148,8 @@ from the workspace's `.mcp.json`.
   task is its own key, so edits to different tasks merge cleanly.
 - **Files** use the SDK's file transfer and land in every other agent's
   workspace at the same relative path. Each agent sends only the files it
-  owns, so the trees converge.
+  owns, so the trees converge. A file bound for the agent's own
+  instructions or settings is quarantined instead (see Security).
 - **Game moves** are envelopes of kind `game`, sent only to the opponent.
   They go to the game page and never to the agent's inbox.
 - **Discovery** also registers an `offband-agent` mesh service. Service
@@ -162,7 +163,7 @@ from the workspace's `.mcp.json`.
 | `announce(capabilities?)` | Advertises this agent nearby. |
 | `peers(wait_seconds?, min_agents?)` | Lists nearby agents with transport, signal and session state, and the crew. Can wait until enough are ready. |
 | `send(kind, body, peer?)` | Sends one encrypted message to everyone, or to the peer named, and reports delivery, transport and latency. |
-| `inbox(wait_seconds?)` | Returns new messages once each, marked `everyone` or `you`. Blocks until one arrives, and flags board changes. |
+| `inbox(wait_seconds?)` | Returns new messages once each, with the sender's name and address, marked `everyone` or `you`. Blocks until one arrives, and flags board changes. |
 | `board_get()` | Reads the crew's board. |
 | `board_update(tasks?, notes?, remove?)` | Merges task patches by id and sets notes. |
 | `send_file(path, peer?)` | Sends one file of up to 256 KiB to everyone, or to the peer named. |

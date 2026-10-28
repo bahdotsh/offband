@@ -20,15 +20,23 @@ hears another agent; after that the member with the lowest address among
 those nearby invites any agent that turns up. Two agents that each thought
 they were lowest (each had heard only part of the room) make two crews;
 every node then picks the same one, and moves what it wrote into it.
+
+Everything that arrives from a peer is untrusted: a peer may run any code
+on top of the SDK. Envelopes are validated, inbound files are capped, files
+that would land on the agent's own instructions or settings are
+quarantined, and a name a peer claims never replaces the one already known
+for its address.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import itertools
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -49,16 +57,53 @@ EVERYONE = ("all", "everyone", "crew")
 # What an agent may say. "hello" and "game" are the node's own; the rest are
 # the agent protocol (see offband/agent/OFFBAND.md).
 AGENT_KINDS = ("propose", "accept", "counter", "task", "review", "done", "chat", "question")
-SYSTEM_KINDS = ("hello", "game", "file")
+# What a peer may put in an envelope's "kind". "file" is not one: file
+# entries come only from the SDK's own file transfer events.
+INBOUND_KINDS = AGENT_KINDS + ("hello", "game")
 
 # BLE is slow and the local API caps a request near the frame limit. Source
-# files of tens of KiB are the intended size.
+# files of tens of KiB are the intended size. The same limit applies to
+# files that arrive: anything larger is refused, not written.
 MAX_FILE_BYTES = 256 * 1024
 MAX_BODY_CHARS = 16 * 1024
+MAX_INBOUND_CHARS = 4 * MAX_BODY_CHARS  # the whole envelope, as received
+MAX_NAME_CHARS = 40
 HELLO_SESSION_WAIT = 4.0
 CREW_WAIT = 20.0
 CREW_SETTLE = 2.5  # lets the room fill in before the creator picks it
 LOG_LIMIT = 2000
+SEEN_LIMIT = 4096
+
+# A peer's file never lands on these in the workspace, at any depth: they
+# are the agent's own instructions. Nor on any path with a component that
+# starts with "." (.mcp.json, .claude/settings.json, .git/...). Such files
+# go to the quarantine under .offband/received/<sender>/ instead.
+PROTECTED_NAMES = frozenset({"claude.md", "claude.local.md", "offband.md", "agents.md"})
+
+
+class _Recent:
+    """A set that forgets its oldest members past ``limit``."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self._items: dict[str, None] = {}
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._items
+
+    def add(self, item: str) -> None:
+        self._items[item] = None
+        while len(self._items) > self.limit:
+            self._items.pop(next(iter(self._items)))
+
+
+def protected_path(parts: list[str]) -> str | None:
+    """The component that makes a relative path unsafe for a peer to write,
+    or None."""
+    for part in parts:
+        if part.startswith(".") or part.lower() in PROTECTED_NAMES:
+            return part
+    return None
 
 
 def short(address: str | None) -> str:
@@ -138,6 +183,8 @@ class Node:
         self.api = api
         self.name = name
         self.workspace = workspace.resolve() if workspace else None
+        # The quarantine for files a peer may not write into the workspace,
+        # and the only destination when the node has no workspace.
         self.files_dir = (files_dir or (self.workspace / ".offband" / "received" if self.workspace else None))
         self.address: str | None = None
         self.peers: dict[str, Peer] = {}
@@ -145,7 +192,7 @@ class Node:
         self.capabilities: dict[str, Any] = {}
         self._seq = itertools.count(1)
         self._inbox_cursor = 0
-        self._seen_ids: set[str] = set()
+        self._seen_ids = _Recent(SEEN_LIMIT)
         self._by_message_id: dict[str, Entry] = {}
         self._file_entries: dict[str, Entry] = {}
         self._ciphers: dict[str, str] = {}
@@ -177,7 +224,9 @@ class Node:
             topology = await self.api.call("get_topology")
         except RpcError:
             return
-        for node in topology.get("nodes", []):
+        for node in (topology or {}).get("nodes", []):
+            if not isinstance(node, dict):
+                continue
             address = node.get("id") or node.get("peer_id") or node.get("address")
             if isinstance(address, str) and address.startswith("off1") and address != self.address:
                 self._touch_peer(address, None)
@@ -270,7 +319,7 @@ class Node:
             await asyncio.sleep(0.3)
         body = {"name": self.name, "capabilities": self.capabilities, "want_reply": want_reply}
         try:
-            await self._send_envelope(address, "hello", body, log=False)
+            await self._post(address, "hello", body)
         except (RpcError, ConnectionError) as exc:
             logger.info("hello to %s not sent yet: %s", short(address), exc)
             peer = self.peers.get(address)
@@ -336,9 +385,12 @@ class Node:
         if peer.startswith("off1") and peer in self.peers:
             return peer
         lowered = peer.lower()
-        for p in self.peers.values():
-            if p.name and p.name.lower() == lowered:
-                return p.address
+        named = [p.address for p in self.peers.values() if p.name and p.name.lower() == lowered]
+        if len(named) == 1:
+            return named[0]
+        if len(named) > 1:
+            # Names are what peers claim, not who they are: never guess.
+            raise NodeError(f"Several peers call themselves {peer!r} ({', '.join(named)}); give the address.")
         matches = [a for a in self.peers if a.startswith(peer)]
         if len(matches) == 1:
             return matches[0]
@@ -352,18 +404,19 @@ class Node:
 
     # --------------------------------------------------------------- messages
 
-    async def _send_envelope(
-        self, address: str, kind: str, body: Any, log: bool = True, audience: str | None = None
-    ) -> Entry | None:
+    async def _post(self, address: str, kind: str, body: Any, audience: str | None = None) -> str:
+        """Sends one envelope and returns the SDK's message id."""
         envelope = {"ob": ENVELOPE_VERSION, "kind": kind, "from": self.name, "body": body}
         if audience:
             envelope["to"] = audience
         content = json.dumps(envelope)
-        message_id = await self.api.call(
+        return await self.api.call(
             "send_message", {"recipient": address, "content": content, "priority": "High" if kind == "game" else "Medium"}
         )
-        if not log:
-            return None
+
+    async def _send_envelope(self, address: str, kind: str, body: Any, audience: str | None = None) -> Entry:
+        """Sends one envelope and logs it."""
+        message_id = await self._post(address, kind, body, audience)
         entry = Entry(
             seq=next(self._seq), direction="out", peer=address, kind=kind, body=body, ts=time.time(),
             message_id=message_id, status="sent", sender_name=self.name,
@@ -384,9 +437,7 @@ class Node:
         audience = "all" if len(addresses) > 1 else None
         entries = []
         for address in addresses:
-            entry = await self._send_envelope(address, kind, body, audience=audience)
-            assert entry is not None
-            entries.append(entry)
+            entries.append(await self._send_envelope(address, kind, body, audience=audience))
         await asyncio.gather(*(self._await_status(e, wait_delivery) for e in entries))
         return self._outcomes(entries)
 
@@ -436,20 +487,25 @@ class Node:
             for old in dropped:
                 if old.message_id:
                     self._by_message_id.pop(old.message_id, None)
+                    self._file_entries.pop(old.message_id, None)
         self._emit({"t": "msg", "msg": self._radar_view(entry)})
 
     def _radar_view(self, entry: Entry) -> dict[str, Any]:
+        """Never raises, whatever the body holds: state() renders every
+        recent entry, so one bad entry would break the radar for good."""
         view = entry.view()
         view["peer_name"] = self.peer_name(entry.peer)
         body = entry.body
-        if isinstance(body, (dict, list)):
-            text = json.dumps(body)
-        else:
-            text = str(body)
+        try:
+            text = json.dumps(body) if isinstance(body, (dict, list)) else str(body)
+        except (TypeError, ValueError):
+            text = repr(body)
         view["summary"] = text if len(text) <= 240 else text[:237] + "..."
-        if entry.kind == "file":
+        if entry.kind == "file" and isinstance(body, dict):
             view.pop("body", None)
             view["summary"] = f"{body.get('path')} ({body.get('bytes')} bytes)"
+            if body.get("note"):
+                view["summary"] += f", {body['note']}"
         return view
 
     async def inbox(self, wait_seconds: float = 0.0, peek: bool = False) -> dict[str, Any]:
@@ -481,6 +537,7 @@ class Node:
         for e in fresh:
             item = {
                 "from": e.sender_name or self.peer_name(e.peer),
+                "address": e.peer,  # who sent it; the name is only what it claims
                 "to": "everyone" if e.audience == "all" else "you",
                 "kind": e.kind,
                 "body": e.body,
@@ -534,23 +591,43 @@ class Node:
                 pass
         return source.name
 
-    def _store_received(self, sender: str, encoded_name: str, data: bytes) -> tuple[str, Path | None]:
-        relative = unquote(encoded_name)
-        parts = [p for p in Path(relative).parts if p not in ("", ".")]
-        if not parts or any(p == ".." for p in parts) or Path(relative).is_absolute():
-            parts = [Path(relative).name or "received.bin"]
+    @staticmethod
+    def _clean_relative(encoded_name: str) -> list[str]:
+        """The path a peer asked for, as safe relative parts. ``..`` and
+        absolute paths are reduced to the file name."""
+        relative = unquote(encoded_name).replace("\\", "/")
+        parts = [p for p in relative.split("/") if p not in ("", ".")]
+        if not parts or ".." in parts or relative.startswith("/"):
+            name = parts[-1] if parts and parts[-1] != ".." else ""
+            parts = [name or "received.bin"]
+        return parts
+
+    def _store_received(self, sender: str, encoded_name: str, data: bytes) -> tuple[str, Path | None, str | None]:
+        """Writes a received file. Returns the path the peer asked for, where
+        it was saved (None if nowhere), and a note for the agent."""
+        parts = self._clean_relative(encoded_name)
         relative = "/".join(parts)
-        # Into the shared workspace at the same path, so both trees converge;
-        # an agent only ever sends files it owns.
-        root = self.workspace or self.files_dir
-        if root is None:
-            return relative, None
+        # Into the shared workspace at the same path, so the trees converge;
+        # an agent only ever sends files it owns. Never onto the agent's own
+        # instructions or settings: those go to the quarantine.
+        note = None
+        root = self.workspace
+        blocked = protected_path(parts)
+        if root is None or blocked is not None:
+            if self.files_dir is None:
+                return relative, None, "not saved: this node has nowhere to put files"
+            root = self.files_dir / (re.sub(r"[^A-Za-z0-9]", "", sender)[:24] or "unknown")
+            if blocked is not None and self.workspace is not None:
+                note = f"quarantined: a peer may not write {blocked!r} in the workspace"
+        root = root.resolve()
         target = (root / relative).resolve()
-        if not str(target).startswith(str(root.resolve())):
-            return relative, None
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return relative, None, "not saved: the path leaves the workspace"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        return relative, target
+        return relative, target, note
 
     # ------------------------------------------------------------------- crew
 
@@ -638,6 +715,8 @@ class Node:
         return bool(nearby) and min(nearby) == self.address
 
     async def _ensure_crew(self, create: bool) -> str | None:
+        """The crew's group id. With ``create``, makes the crew when there
+        is none (and raises NodeError when no agent is nearby to share it)."""
         async with self._crew_lock:
             if self.crew is None:
                 await self._load_crew()
@@ -655,7 +734,8 @@ class Node:
             return self.crew
 
     async def _invite_missing(self) -> None:
-        assert self.crew is not None
+        if self.crew is None:
+            return
         added = False
         for peer in self.agents():
             if peer.address in self.crew_members:
@@ -746,15 +826,23 @@ class Node:
         """Merges task fields by id and sets notes. Each task id is its own
         key, so agents editing different tasks never collide; the same task
         edited on two sides resolves last write wins."""
+        if tasks is not None and (not isinstance(tasks, list) or not all(isinstance(t, dict) for t in tasks)):
+            raise NodeError("tasks must be a list of objects, each with an id.")
+        if notes is not None and not isinstance(notes, dict):
+            raise NodeError("notes must be an object of named text blocks.")
+        if remove is not None and not isinstance(remove, list):
+            raise NodeError("remove must be a list of task ids.")
+        for patch in tasks or []:
+            if "id" not in patch or not str(patch["id"]).strip():
+                raise NodeError("Every task needs an id, e.g. {\"id\": \"rules\", \"title\": ..., \"owner\": ...}.")
         await self._await_crew()
         crew = await self._ensure_crew(create=True)
-        assert crew is not None
+        if crew is None:
+            raise NodeError("No crew yet. Call peers(wait_seconds=30) and try again.")
         space = {"space_id": crew, "doc_id": BOARD_DOC}
         await self.api.call("data.create_doc", space)
         current = {t["id"]: t for t in (await self.board_get())["tasks"]}
         for patch in tasks or []:
-            if "id" not in patch or not str(patch["id"]).strip():
-                raise NodeError("Every task needs an id, e.g. {\"id\": \"rules\", \"title\": ..., \"owner\": ...}.")
             task_id = str(patch["id"])
             merged = {**current.get(task_id, {}), **patch}
             merged.pop("id", None)
@@ -771,7 +859,7 @@ class Node:
                  "value_json": json.dumps({"kind": "text", "value": str(text)})},
             )
         for task_id in remove or []:
-            await self.api.call("data.map_delete", {**space, "collection": "tasks", "key": task_id})
+            await self.api.call("data.map_delete", {**space, "collection": "tasks", "key": str(task_id)})
         await self.api.call("data.flush", space)
         board = await self.board_get()
         self._emit({"t": "board", "board": board, "by": self.name})
@@ -782,7 +870,6 @@ class Node:
     async def game_send(self, payload: dict[str, Any], peer: str | None = None) -> dict[str, Any]:
         address = self.resolve_peer(peer)
         entry = await self._send_envelope(address, "game", payload)
-        assert entry is not None
         return {"message_id": entry.message_id}
 
     def game_info(self, vs: str | None = None) -> dict[str, Any]:
@@ -807,6 +894,8 @@ class Node:
     # ----------------------------------------------------------------- events
 
     async def _on_event(self, event: dict[str, Any]) -> None:
+        # The rpc dispatcher runs this off the socket reader, so handlers may
+        # call the API; they still run one at a time, in the service's order.
         kind = event.get("type")
         handler = getattr(self, f"_ev_{kind}", None)
         if handler is not None:
@@ -900,24 +989,33 @@ class Node:
         if not message_id or message_id in self._seen_ids:
             return  # replay after a reconnect is at least once
         self._seen_ids.add(message_id)
-        sender = event.get("sender", "")
+        sender = event.get("sender")
+        if not isinstance(sender, str) or not sender:
+            return
         transport = transport_label(event.get("transport"))
         self._set_link(transport)
         peer = self._touch_peer(sender, transport)
-        try:
-            envelope = json.loads(event.get("content") or "")
-            if not isinstance(envelope, dict) or envelope.get("ob") != ENVELOPE_VERSION:
-                raise ValueError
-            kind = str(envelope.get("kind"))
-            body = envelope.get("body")
-            sender_name = envelope.get("from")
-            audience = "all" if envelope.get("to") == "all" else None
-        except ValueError:
-            kind, body, sender_name, audience = "chat", event.get("content"), None, None
-        if isinstance(sender_name, str) and sender_name:
-            if peer.name != sender_name:
-                peer.name = sender_name
-                self._emit({"t": "peer", "peer": peer.view()})
+        content = event.get("content")
+        content = content if isinstance(content, str) else ""
+        if len(content) > MAX_INBOUND_CHARS:
+            logger.warning("dropped a %d-char message from %s", len(content), short(sender))
+            kind, body, sender_name, audience = "chat", f"[a message of {len(content)} chars, too long to show]", None, None
+        else:
+            try:
+                envelope = json.loads(content)
+                if not isinstance(envelope, dict) or envelope.get("ob") != ENVELOPE_VERSION:
+                    raise ValueError
+                kind = str(envelope.get("kind"))
+                body = envelope.get("body")
+                sender_name = envelope.get("from")
+                audience = "all" if envelope.get("to") == "all" else None
+            except ValueError:
+                kind, body, sender_name, audience = "chat", content, None, None
+        if kind not in INBOUND_KINDS:
+            kind = "chat"  # an unknown kind, or one only the node may make ("file")
+        self._claim_name(peer, sender_name)
+        if kind == "game" and not isinstance(body, dict):
+            return  # the game page expects an object; drop anything else
         if kind == "hello":
             await self._on_hello(peer, body if isinstance(body, dict) else {})
             return
@@ -938,7 +1036,7 @@ class Node:
         self._introduced.add(peer.address)
         peer.is_agent = True
         if isinstance(body.get("capabilities"), dict):
-            peer.capabilities = body["capabilities"]
+            peer.capabilities = {str(k)[:40]: str(v)[:200] for k, v in list(body["capabilities"].items())[:16]}
         self._emit({"t": "peer", "peer": peer.view()})
         if body.get("want_reply"):
             self._spawn(self._send_hello(peer.address, want_reply=False))
@@ -956,16 +1054,36 @@ class Node:
         if file_id in self._seen_ids:
             return
         self._seen_ids.add(file_id)
-        sender = event.get("sender", "")
+        sender = event.get("sender")
+        if not isinstance(sender, str) or not sender:
+            return
         peer = self._touch_peer(sender, None)
-        try:
-            data = base64.b64decode(event.get("file_data") or "")
-        except ValueError:
-            data = b""
-        relative, saved = self._store_received(sender, event.get("file_name") or "file", data)
+        encoded = event.get("file_data")
+        encoded = encoded if isinstance(encoded, str) else ""
+        name = event.get("file_name")
+        name = name if isinstance(name, str) and name else "file"
+        size = len(encoded) * 3 // 4
+        saved: Path | None = None
+        if size > MAX_FILE_BYTES:
+            # Refused before decoding: the limit the sender should have kept.
+            relative = "/".join(self._clean_relative(name))
+            note = f"refused: over the {MAX_FILE_BYTES}-byte limit, not saved"
+            logger.warning("refused a %d-byte file from %s", size, short(sender))
+        else:
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                data = b""
+            size = len(data)
+            try:
+                relative, saved, note = await asyncio.to_thread(self._store_received, sender, name, data)
+            except OSError as exc:
+                relative, note = "/".join(self._clean_relative(name)), f"not saved: {exc.strerror or exc}"
+        body: dict[str, Any] = {"path": relative, "bytes": size, "saved_to": str(saved) if saved else None}
+        if note:
+            body["note"] = note
         entry = Entry(
-            seq=next(self._seq), direction="in", peer=sender, kind="file",
-            body={"path": relative, "bytes": len(data), "saved_to": str(saved) if saved else None},
+            seq=next(self._seq), direction="in", peer=sender, kind="file", body=body,
             ts=time.time(), message_id=file_id, sender_name=peer.name, transport=self.link_transport,
         )
         self._append(entry)
@@ -977,19 +1095,33 @@ class Node:
         if not isinstance(address, str) or address == self.address:
             return
         peer = self._touch_peer(address, None)
-        caps = event.get("capabilities") or {}
+        caps = event.get("capabilities")
         peer.is_agent = True
-        if caps.get("name") and not peer.name:
-            peer.name = caps["name"]
+        self._claim_name(peer, caps.get("name") if isinstance(caps, dict) else None)
         self._emit({"t": "peer", "peer": peer.view()})
+
+    def _claim_name(self, peer: Peer, name: Any) -> None:
+        """A peer's name is what it claims. The first claim for an address
+        stands; a later different one, or our own name, is ignored."""
+        if not isinstance(name, str) or not name.strip():
+            return
+        name = name.strip()[:MAX_NAME_CHARS]
+        if peer.name is None:
+            if name.lower() == self.name.lower():
+                logger.warning("%s claims this node's own name %r; ignored", short(peer.address), name)
+                return
+            peer.name = name
+            self._emit({"t": "peer", "peer": peer.view()})
+        elif peer.name != name:
+            logger.warning("%s now claims the name %r; keeping %r", short(peer.address), name, peer.name)
 
     async def _ev_data_changed(self, event: dict[str, Any]) -> None:
         if event.get("doc_id") != BOARD_DOC:
             return
         if self.crew is not None and event.get("space_id") == self.crew:
             self._board_dirty = True
-            # Never call the API from inside the event reader: the response
-            # would be read by the task that is waiting for it.
+            # In a task of its own, so a burst of edits does not hold up
+            # the events behind it.
             self._spawn(self._push_board())
 
     async def _ev_group_member_added(self, event: dict[str, Any]) -> None:
