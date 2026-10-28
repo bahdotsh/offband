@@ -1,26 +1,30 @@
 """The Offband daemon: owns the node and serves it on loopback.
 
     /                 the radar page
+    /fonts/...        the radar's fonts, bundled so the page works offline
     /game/            the game the agents build (served from the workspace)
     /offband.js       the game bridge (send and receive moves over the link)
     /api/...          the JSON API the MCP server and the pages call
     /api/stream       radar events, as server-sent events
     /api/game/stream  game moves from the peer, as server-sent events
 
-Loopback only. Every POST must carry ``X-Offband: 1`` and every request a
-loopback Host header: a header a cross-site form cannot set forces a CORS
-preflight this server never answers, and the Host check stops DNS
-rebinding. Together they keep a web page in the same browser from making
-the agent say things.
+Loopback only. Every request needs a loopback Host header, which stops DNS
+rebinding. Every /api/ request also needs ``X-Offband: 1``, a header a
+cross-site page can only send after a CORS preflight this server never
+answers; that covers GETs too, because some of them have effects (reading
+the inbox consumes it). The two event streams are exempt, because
+EventSource cannot set headers: they only read, and a cross-site page cannot
+read their responses.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -36,6 +40,16 @@ logger = logging.getLogger(__name__)
 
 WEB = Path(__file__).parent / "web"
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+UNGUARDED_API = {"/api/stream", "/api/game/stream"}
+FONTS = {"FamiljenGrotesk.woff2", "JetBrainsMono.woff2"}
+
+
+def host_name(host: str) -> str:
+    """The host part of a Host header, without the port."""
+    if host.startswith("["):
+        end = host.find("]")
+        return host[: end + 1] if end > 0 else host
+    return host.rsplit(":", 1)[0]
 
 
 class Guard:
@@ -44,12 +58,13 @@ class Guard:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
-            headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
-            host = headers.get("host", "").rsplit(":", 1)[0] if not headers.get("host", "").startswith("[") else "[::1]"
-            if host not in LOOPBACK_HOSTS:
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+            if host_name(headers.get("host", "")) not in LOOPBACK_HOSTS:
                 await PlainTextResponse("forbidden host", status_code=403)(scope, receive, send)
                 return
-            if scope["method"] not in ("GET", "HEAD") and headers.get("x-offband") != "1":
+            path = scope.get("path", "")
+            needs_header = path.startswith("/api/") and path not in UNGUARDED_API
+            if (needs_header or scope["method"] not in ("GET", "HEAD")) and headers.get("x-offband") != "1":
                 await PlainTextResponse("missing X-Offband header", status_code=403)(scope, receive, send)
                 return
         await self.app(scope, receive, send)
@@ -64,6 +79,31 @@ def _error(exc: Exception) -> JSONResponse:
         return JSONResponse({"error": f"the SDK service is not reachable: {exc}"}, status_code=503)
     logger.exception("request failed")
     return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
+
+
+def api(handler: Callable[[Request], Awaitable[Any]]) -> Callable[[Request], Awaitable[Response]]:
+    """Wraps a handler that returns JSON-able data: every failure becomes a
+    JSON error with the right status."""
+
+    @functools.wraps(handler)
+    async def wrapped(request: Request) -> Response:
+        try:
+            result = await handler(request)
+        except Exception as exc:
+            return _error(exc)
+        return result if isinstance(result, Response) else JSONResponse(result)
+
+    return wrapped
+
+
+def _number(request: Request, name: str, default: float, kind: type = float) -> Any:
+    raw = request.query_params.get(name)
+    if raw is None:
+        return kind(default)
+    try:
+        return kind(raw)
+    except ValueError:
+        raise NodeError(f"{name} must be a number.") from None
 
 
 async def _json(request: Request) -> dict[str, Any]:
@@ -110,13 +150,23 @@ def build_app(node: Node, game_dir: Path | None = None) -> Starlette:
     async def bridge(_: Request) -> Response:
         return FileResponse(WEB / "offband.js", media_type="text/javascript")
 
+    async def font(request: Request) -> Response:
+        name = request.path_params["name"]
+        if name not in FONTS:
+            return PlainTextResponse("not found", status_code=404)
+        return FileResponse(WEB / "fonts" / name, media_type="font/woff2",
+                            headers={"Cache-Control": "max-age=86400"})
+
     async def game(request: Request) -> Response:
         root = game_dir or (node.workspace / "game" if node.workspace else None)
         if root is None:
             return PlainTextResponse("no game directory", status_code=404)
+        root = root.resolve()
         relative = request.path_params.get("path") or "index.html"
         target = (root / relative).resolve()
-        if not str(target).startswith(str(root.resolve())):
+        try:
+            target.relative_to(root)
+        except ValueError:
             return PlainTextResponse("not found", status_code=404)
         if target.is_dir():
             target = target / "index.html"
@@ -129,75 +179,61 @@ def build_app(node: Node, game_dir: Path | None = None) -> Starlette:
     async def game_redirect(_: Request) -> Response:
         return Response(status_code=307, headers={"Location": "/game/"})
 
-    async def state(_: Request) -> Response:
-        return JSONResponse(node.state())
+    @api
+    async def state(_: Request) -> Any:
+        return node.state()
 
     async def stream(_: Request) -> Response:
         return _sse(node.add_listener, initial=[{"t": "state", "state": node.state()}])
 
-    async def peers(request: Request) -> Response:
-        try:
-            wait = float(request.query_params.get("wait", "0"))
-            min_agents = int(request.query_params.get("min_agents", "1"))
-            return JSONResponse({"me": {"name": node.name, "address": node.address},
-                                 "peers": await node.list_peers(wait, min_agents),
-                                 "crew": node.crew_view()})
-        except Exception as exc:
-            return _error(exc)
+    @api
+    async def peers(request: Request) -> Any:
+        wait = _number(request, "wait", 0)
+        min_agents = _number(request, "min_agents", 1, int)
+        return {"me": {"name": node.name, "address": node.address},
+                "peers": await node.list_peers(wait, min_agents),
+                "crew": node.crew_view()}
 
-    async def send(request: Request) -> Response:
-        try:
-            body = await _json(request)
-            return JSONResponse(await node.send(body.get("peer"), str(body.get("kind", "chat")), body.get("body")))
-        except Exception as exc:
-            return _error(exc)
+    @api
+    async def send(request: Request) -> Any:
+        body = await _json(request)
+        return await node.send(body.get("peer"), str(body.get("kind", "chat")), body.get("body"))
 
-    async def inbox(request: Request) -> Response:
-        try:
-            wait = float(request.query_params.get("wait", "0"))
-            peek = request.query_params.get("peek") == "1"
-            return JSONResponse(await node.inbox(wait, peek))
-        except Exception as exc:
-            return _error(exc)
+    @api
+    async def inbox(request: Request) -> Any:
+        return await node.inbox(_number(request, "wait", 0), request.query_params.get("peek") == "1")
 
-    async def board(request: Request) -> Response:
-        try:
-            if request.method == "GET":
-                return JSONResponse(await node.board_get())
-            body = await _json(request)
-            return JSONResponse(await node.board_update(body.get("tasks"), body.get("notes"), body.get("remove")))
-        except Exception as exc:
-            return _error(exc)
+    @api
+    async def board(request: Request) -> Any:
+        if request.method == "GET":
+            return await node.board_get()
+        body = await _json(request)
+        return await node.board_update(body.get("tasks"), body.get("notes"), body.get("remove"))
 
-    async def send_file(request: Request) -> Response:
-        try:
-            body = await _json(request)
-            return JSONResponse(await node.send_file(body.get("peer"), str(body.get("path", ""))))
-        except Exception as exc:
-            return _error(exc)
+    @api
+    async def send_file(request: Request) -> Any:
+        body = await _json(request)
+        return await node.send_file(body.get("peer"), str(body.get("path", "")))
 
-    async def announce(request: Request) -> Response:
-        try:
-            body = await _json(request)
-            caps = body.get("capabilities") or {}
-            if not isinstance(caps, dict):
-                raise NodeError("capabilities must be an object")
-            return JSONResponse(await node.announce(caps))
-        except Exception as exc:
-            return _error(exc)
+    @api
+    async def announce(request: Request) -> Any:
+        body = await _json(request)
+        caps = body.get("capabilities") or {}
+        if not isinstance(caps, dict):
+            raise NodeError("capabilities must be an object")
+        return await node.announce(caps)
 
-    async def game_info(request: Request) -> Response:
-        return JSONResponse(node.game_info(request.query_params.get("vs")))
+    @api
+    async def game_info(request: Request) -> Any:
+        return node.game_info(request.query_params.get("vs"))
 
-    async def game_send(request: Request) -> Response:
-        try:
-            body = await _json(request)
-            payload = body.get("payload")
-            if not isinstance(payload, dict) or not body.get("peer"):
-                raise NodeError("Send {\"peer\": <opponent address>, \"payload\": {...}}.")
-            return JSONResponse(await node.game_send(payload, str(body["peer"])))
-        except Exception as exc:
-            return _error(exc)
+    @api
+    async def game_send(request: Request) -> Any:
+        body = await _json(request)
+        payload = body.get("payload")
+        if not isinstance(payload, dict) or not body.get("peer"):
+            raise NodeError("Send {\"peer\": <opponent address>, \"payload\": {...}}.")
+        return await node.game_send(payload, str(body["peer"]))
 
     async def game_stream(_: Request) -> Response:
         return _sse(node.add_game_listener)
@@ -205,6 +241,7 @@ def build_app(node: Node, game_dir: Path | None = None) -> Starlette:
     routes = [
         Route("/", radar),
         Route("/offband.js", bridge),
+        Route("/fonts/{name}", font),
         Route("/game", game_redirect),
         Route("/game/", game),
         Route("/game/{path:path}", game),

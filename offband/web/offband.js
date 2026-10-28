@@ -17,7 +17,8 @@
   "use strict";
 
   async function info(vs) {
-    const r = await fetch("/api/game" + (vs ? "?vs=" + encodeURIComponent(vs) : ""));
+    const r = await fetch("/api/game" + (vs ? "?vs=" + encodeURIComponent(vs) : ""),
+      { headers: { "X-Offband": "1" } });
     if (!r.ok) throw new Error("Offband daemon not reachable");
     return r.json();
   }

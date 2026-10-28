@@ -4,9 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Offband radar</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+/* Bundled with the daemon: the radar runs with no internet. */
+@font-face { font-family: "Familjen Grotesk"; src: url("/fonts/FamiljenGrotesk.woff2") format("woff2");
+  font-weight: 400 700; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("/fonts/JetBrainsMono.woff2") format("woff2");
+  font-weight: 400 500; font-display: swap; }
 :root {
   --chart: #e6ecef;
   --chart-deep: #d5dee3;
@@ -437,7 +440,7 @@ function renderBoard(board) {
 async function loadBoard() {
   if (!shown.length) return;
   try {
-    const r = await fetch("/api/board");
+    const r = await fetch("/api/board", { headers: { "X-Offband": "1" } });
     if (r.ok) renderBoard(await r.json());
   } catch (_) { /* the stream will bring it */ }
 }

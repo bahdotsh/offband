@@ -186,7 +186,8 @@ async def _truthy(value) -> bool:
 
 
 def _get(url: str):
-    with urllib.request.urlopen(url, timeout=5) as resp:
+    req = urllib.request.Request(url, headers={"X-Offband": "1"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read())
 
 
