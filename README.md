@@ -115,6 +115,14 @@ on ports 7777, 7778, 7779 and up. Open an agent in each workspace as above.
 `scripts/headless_rehearsal.sh ./rehearsal ada grace linus` runs the whole
 exchange with `claude -p`, the first name as the lead, and logs every agent.
 
+### Starting clean
+
+A node keeps its identity, its crew and the board in its home
+(`~/.offband/<name>`, or `rehearsal/.<name>-node`), so a second run picks up
+where the first stopped. Pass `--fresh` to `up` or `rehearse` to start with
+a new identity and an empty board. It deletes only a directory that holds
+nothing but a node's own files.
+
 ### Limiting who can join
 
 By default every Offband agent in range joins the crew. To fix the crew,

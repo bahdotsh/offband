@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from fakes import ADA
 from offband import cli
 
@@ -14,6 +16,24 @@ def test_init_keeps_the_rest_of_claude_md(tmp_path):
     text = md.read_text()
     assert text.startswith("# Mine\n\nKeep this.\n")
     assert text.count(cli.MARK_START) == 1 and "7778" in text and "7777/" not in text
+
+
+def test_fresh_deletes_a_node_home_and_nothing_else(tmp_path):
+    home = tmp_path / "ada"
+    (home / "keys").mkdir(parents=True)
+    (home / "store.key").write_text("k")
+    cli.reset_home(home)
+    assert not home.exists()
+
+    stranger = tmp_path / "docs"
+    stranger.mkdir()
+    (stranger / "thesis.tex").write_text("years of work")
+    with pytest.raises(SystemExit):
+        cli.reset_home(stranger)
+    (stranger / "config.json").write_text("{}")
+    with pytest.raises(SystemExit):
+        cli.reset_home(stranger)  # looks like a home, but holds other files
+    assert (stranger / "thesis.tex").exists()
 
 
 def test_allow_needs_full_addresses():

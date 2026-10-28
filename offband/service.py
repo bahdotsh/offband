@@ -7,11 +7,12 @@ Layout of a node home (default ``~/.offband/<name>``)::
     store.key     the at-rest store key, 0600, generated once
     keys/         sealed MLS store
     state/        protocol state, including replicated documents
+    service.log   the service's own log, rotated to service.log.1 at start
+                  once it passes LOG_ROTATE_BYTES
 
 The local API socket lives at ``/tmp/offband-<uid>/<hash>.sock`` (directory
 0700), because a Unix socket path is limited to about 100 bytes and a home
 under a deep directory would not fit.
-    service.log   the service's own log
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ BASE_CONFIG = {
     "pending_ttl_ms": 604800000,
     "overflow_policy": "DropOldest",
 }
+
+LOG_ROTATE_BYTES = 10 * 1024 * 1024
 
 # "ble" is the demo: Bluetooth only, so no LAN link can form even when AWDL
 # brings one up. "lan" is for rehearsals on one machine or one network.
@@ -117,7 +120,10 @@ class ServiceSpec:
 
     def spawn(self, log_to_file: bool = True) -> subprocess.Popen[bytes]:
         env = self.prepare()
-        stdout = open(self.home / "service.log", "ab") if log_to_file else None
+        log = self.home / "service.log"
+        if log_to_file and log.exists() and log.stat().st_size > LOG_ROTATE_BYTES:
+            log.replace(self.home / "service.log.1")
+        stdout = open(log, "ab") if log_to_file else None
         return subprocess.Popen(
             self.command(), env=env, stdout=stdout, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL
         )

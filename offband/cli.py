@@ -39,6 +39,8 @@ def _add_up_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--game-dir", help="serve the game from here instead of <workspace>/game")
     p.add_argument("--allow", action="append", default=[], metavar="ADDRESS",
                    help="only talk to this peer address (off1...); repeat once per peer. Default: anyone nearby")
+    p.add_argument("--fresh", action="store_true",
+                   help="start with a new identity, no crew and no board: deletes the node home first")
     p.add_argument("--log-level", default="INFO")
 
 
@@ -48,6 +50,8 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
     from .rpc import LocalApi
 
     home = Path(args.home).expanduser() if args.home else default_home(args.name.lower())
+    if args.fresh:
+        reset_home(home)
     spec = ServiceSpec(home=home, transport=args.transport, listen=args.listen, peers=args.peer,
                        lan_discovery=args.lan_discovery, log_level=args.log_level)
     workspace = Path(args.workspace).expanduser().resolve()
@@ -85,6 +89,21 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
                 await asyncio.to_thread(proc.wait, 15)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+def reset_home(home: Path) -> None:
+    """Deletes a node home, so the node starts with a new identity and none
+    of the last run's crew or board. Refuses a directory that does not look
+    like a node home, so a mistyped --home never deletes anything else."""
+    if not home.exists():
+        return
+    markers = ("config.json", "store.key", "keys", "state")
+    if not home.is_dir() or not any((home / m).exists() for m in markers):
+        raise SystemExit(f"--fresh: {home} is not an Offband node home; not deleting it")
+    unexpected = [p.name for p in home.iterdir() if p.name not in markers + ("service.log", "service.log.1")]
+    if unexpected:
+        raise SystemExit(f"--fresh: {home} holds files Offband did not make ({', '.join(unexpected)}); not deleting it")
+    shutil.rmtree(home)
 
 
 def _check_allow(addresses: list[str]) -> str | None:
@@ -132,7 +151,7 @@ def cmd_rehearse(args: argparse.Namespace) -> int:
                 # dialling the earlier ones: two nodes dialling each other at
                 # once can lose the first key exchange (README, Known issues).
                 transport="lan", listen=links[i], peer=links[:i], lan_discovery=False, game_dir=None,
-                allow=[], log_level=args.log_level,
+                allow=[], fresh=args.fresh, log_level=args.log_level,
             )
             init_workspace(Path(ns.workspace), name, ports[i], quiet=True)
             runs.append(asyncio.create_task(_run_node(ns, stop)))
@@ -223,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
     rehearse.add_argument("--names", nargs="+", default=["Ada", "Grace"], help="one node per name (two or more)")
     rehearse.add_argument("--port", type=int, default=7777, help="radar port of the first node; the rest count up")
     rehearse.add_argument("--link-port", type=int, default=7911, help="loopback link port of the first node")
+    rehearse.add_argument("--fresh", action="store_true",
+                          help="start every node with a new identity, no crew and no board")
     rehearse.add_argument("--log-level", default="INFO")
     rehearse.set_defaults(fn=cmd_rehearse)
 
