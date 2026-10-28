@@ -128,3 +128,21 @@ async def test_a_newcomer_that_hears_of_a_crew_waits_to_be_invited(node):
 def test_a_crew_merge_keeps_the_newer_task():
     assert _stamp(json.dumps({"updated_at": 5})) > _stamp(json.dumps({"updated_at": 2}))
     assert _stamp("not json") == 0.0 and _stamp(json.dumps({"title": "x"})) == 0.0
+
+
+async def test_a_symlink_in_the_workspace_cannot_reach_a_protected_file(node):
+    (node.workspace / ".claude").mkdir()
+    (node.workspace / "game").mkdir()
+    (node.workspace / "game" / "cfg").symlink_to(node.workspace / ".claude")
+    await receive_file(node, ADA, "game%2Fcfg%2Fsettings.json", b'{"hooks": "evil"}')
+    assert last(node).body["note"].startswith("quarantined")
+    assert not (node.workspace / ".claude" / "settings.json").exists()
+
+
+async def test_a_symlink_out_of_the_workspace_is_not_followed(node, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (node.workspace / "out").symlink_to(outside)
+    await receive_file(node, ADA, "out%2Fx.txt", b"x")
+    assert last(node).body["saved_to"] is None
+    assert not (outside / "x.txt").exists()

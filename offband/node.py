@@ -621,23 +621,33 @@ class Node:
         # Into the shared workspace at the same path, so the trees converge;
         # an agent only ever sends files it owns. Never onto the agent's own
         # instructions or settings: those go to the quarantine.
-        note = None
-        root = self.workspace
         blocked = protected_path(parts)
-        if root is None or blocked is not None:
-            if self.files_dir is None:
-                return relative, None, "not saved: this node has nowhere to put files"
-            root = self.files_dir / (re.sub(r"[^A-Za-z0-9]", "", sender)[:24] or "unknown")
-            if blocked is not None and self.workspace is not None:
-                note = f"quarantined: a peer may not write {blocked!r} in the workspace"
-        root = root.resolve()
+        if self.workspace is not None and blocked is None:
+            root = self.workspace.resolve()
+            target = (root / relative).resolve()
+            try:
+                # A symlink in the workspace can point an innocent path at a
+                # protected one (game/cfg -> ../.claude): judge where it lands.
+                blocked = protected_path(list(target.relative_to(root).parts))
+            except ValueError:
+                return relative, None, "not saved: the path leaves the workspace"
+            if blocked is None:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                return relative, target, None
+        if self.files_dir is None:
+            return relative, None, "not saved: this node has nowhere to put files"
+        root = (self.files_dir / (re.sub(r"[^A-Za-z0-9]", "", sender)[:24] or "unknown")).resolve()
         target = (root / relative).resolve()
         try:
             target.relative_to(root)
         except ValueError:
-            return relative, None, "not saved: the path leaves the workspace"
+            return relative, None, "not saved: the path leaves the quarantine"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+        note = None
+        if blocked is not None and self.workspace is not None:
+            note = f"quarantined: a peer may not write {blocked!r} in the workspace"
         return relative, target, note
 
     # ------------------------------------------------------------------- crew
