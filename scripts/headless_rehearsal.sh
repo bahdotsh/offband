@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
-# Runs two Claude Code agents headless against a running `offband rehearse`,
-# each in its own workspace, and times the build from first prompt to both
-# agents finishing. Logs land beside the workspaces.
+# Runs Claude Code agents headless against a running `offband rehearse`, one
+# per workspace, and times the build from first prompt to every agent
+# finishing. The first workspace is the lead, the rest follow. Logs land
+# beside the workspaces.
 #
-#   offband rehearse --root ./rehearsal        # in another terminal first
-#   scripts/headless_rehearsal.sh ./rehearsal
+#   offband rehearse --root ./rehearsal --names Ada Grace Linus   # in another terminal first
+#   scripts/headless_rehearsal.sh ./rehearsal ada grace linus
+#
+# With only the root, it runs ada and grace.
 set -euo pipefail
 
 ROOT="$(cd "${1:-./rehearsal}" && pwd)"
-LEAD_PROMPT="${LEAD_PROMPT:-Find the agent next to you and build a two-player game with it.}"
-FOLLOW_PROMPT="${FOLLOW_PROMPT:-Work with the agent next to you. It will propose the plan.}"
+shift || true
+NAMES=("$@")
+[ ${#NAMES[@]} -ge 2 ] || NAMES=(ada grace)
+OTHERS=$(( ${#NAMES[@]} - 1 ))
+if [ "$OTHERS" -eq 1 ]; then
+  DEFAULT_LEAD="Find the agent next to you and build a two-player game with it."
+else
+  DEFAULT_LEAD="Find the $OTHERS agents next to you and build a two-player game with them."
+fi
+LEAD_PROMPT="${LEAD_PROMPT:-$DEFAULT_LEAD}"
+FOLLOW_PROMPT="${FOLLOW_PROMPT:-Work with the agents next to you. The lead will propose the plan.}"
 TOOLS="mcp__offband,Read,Write,Edit,Glob,Grep"
 
 run() {
@@ -21,18 +33,22 @@ run() {
 }
 
 start=$(date +%s)
-run "$ROOT/grace" "$FOLLOW_PROMPT" "$ROOT/grace.agent.jsonl" &
-follower=$!
+pids=()
+for name in "${NAMES[@]:1}"; do
+  run "$ROOT/$name" "$FOLLOW_PROMPT" "$ROOT/$name.agent.jsonl" &
+  pids+=($!)
+done
 sleep 5
-run "$ROOT/ada" "$LEAD_PROMPT" "$ROOT/ada.agent.jsonl" &
-lead=$!
+run "$ROOT/${NAMES[0]}" "$LEAD_PROMPT" "$ROOT/${NAMES[0]}.agent.jsonl" &
+pids+=($!)
 
 status=0
-wait "$lead" || status=$?
-wait "$follower" || status=$?
+for pid in "${pids[@]}"; do
+  wait "$pid" || status=$?
+done
 end=$(date +%s)
-echo "both agents finished in $((end - start)) s (exit $status)"
-for name in ada grace; do
+echo "all ${#NAMES[@]} agents finished in $((end - start)) s (exit $status)"
+for name in "${NAMES[@]}"; do
   echo "--- $name: game/"
   ls -la "$ROOT/$name/game" 2>/dev/null || echo "(no game directory)"
 done

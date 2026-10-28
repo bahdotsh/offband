@@ -3,7 +3,7 @@
     offband up    --name Ada --workspace ./ada        SDK service + daemon + radar
     offband init  ./ada --name Ada                    write .mcp.json, OFFBAND.md, CLAUDE.md
     offband mcp                                       the MCP server (Claude Code runs this)
-    offband rehearse                                  two nodes on this machine, linked over loopback
+    offband rehearse --names Ada Grace Linus          linked nodes on this machine, over loopback
 """
 
 from __future__ import annotations
@@ -100,30 +100,34 @@ def cmd_up(args: argparse.Namespace) -> int:
 
 
 def cmd_rehearse(args: argparse.Namespace) -> int:
-    """Two nodes on this machine, linked over loopback peer streams."""
+    """Two or more nodes on this machine, linked over loopback peer streams."""
     root = Path(args.root).expanduser().resolve()
     names = args.names
-    ports = [args.port, args.port + 1]
-    links = ["127.0.0.1:7911", "127.0.0.1:7912"]
+    if len(names) < 2 or len({n.lower() for n in names}) != len(names):
+        print("rehearse needs two or more different names", file=sys.stderr)
+        return 2
+    ports = [args.port + i for i in range(len(names))]
+    links = [f"127.0.0.1:{args.link_port + i}" for i in range(len(names))]
 
-    async def both(stop: asyncio.Event) -> int:
+    async def run_all(stop: asyncio.Event) -> int:
         runs = []
         for i, name in enumerate(names):
             ns = argparse.Namespace(
                 name=name, workspace=str(root / name.lower()), port=ports[i], home=str(root / f".{name.lower()}-node"),
-                # Only the first node dials: two nodes dialling each other at
+                # Each pair is dialled from one side only, the later node
+                # dialling the earlier ones: two nodes dialling each other at
                 # once can lose the first key exchange (README, Known issues).
-                transport="lan", listen=links[i], peer=[links[1]] if i == 0 else [], lan_discovery=False, game_dir=None,
+                transport="lan", listen=links[i], peer=links[:i], lan_discovery=False, game_dir=None,
                 log_level=args.log_level,
             )
             init_workspace(Path(ns.workspace), name, ports[i], quiet=True)
             runs.append(asyncio.create_task(_run_node(ns, stop)))
-        print(f"{names[0]}: workspace {root / names[0].lower()}  radar http://127.0.0.1:{ports[0]}/")
-        print(f"{names[1]}: workspace {root / names[1].lower()}  radar http://127.0.0.1:{ports[1]}/")
+        for i, name in enumerate(names):
+            print(f"{name}: workspace {root / name.lower()}  radar http://127.0.0.1:{ports[i]}/")
         results = await asyncio.gather(*runs)
         return max(results)
 
-    return _main_async(both)
+    return _main_async(run_all)
 
 
 def init_workspace(workspace: Path, name: str, port: int, quiet: bool = False) -> None:
@@ -200,10 +204,11 @@ def main(argv: list[str] | None = None) -> int:
     mcp = sub.add_parser("mcp", help="the MCP server over stdio")
     mcp.set_defaults(fn=cmd_mcp)
 
-    rehearse = sub.add_parser("rehearse", help="two linked nodes on this machine, over loopback")
+    rehearse = sub.add_parser("rehearse", help="two or more linked nodes on this machine, over loopback")
     rehearse.add_argument("--root", default="./rehearsal")
-    rehearse.add_argument("--names", nargs=2, default=["Ada", "Grace"])
-    rehearse.add_argument("--port", type=int, default=7777)
+    rehearse.add_argument("--names", nargs="+", default=["Ada", "Grace"], help="one node per name (two or more)")
+    rehearse.add_argument("--port", type=int, default=7777, help="radar port of the first node; the rest count up")
+    rehearse.add_argument("--link-port", type=int, default=7911, help="loopback link port of the first node")
     rehearse.add_argument("--log-level", default="INFO")
     rehearse.set_defaults(fn=cmd_rehearse)
 
