@@ -208,6 +208,19 @@ async def test_a_crew_that_takes_in_an_outsider_is_left(tmp_path):
         task.cancel()
 
 
+async def test_a_nul_in_a_file_name_is_a_note_not_a_crash(node):
+    await receive_file(node, ADA, "a%00b.txt", b"x")
+    body = last(node).body
+    assert body["saved_to"] is None and body["note"].startswith("not saved")
+
+
+async def test_an_envelope_nested_too_deep_reads_as_chat(node):
+    deep = "[" * 5000 + "]" * 5000
+    await receive(node, ADA, '{"ob": 1, "kind": "task", "from": "Ada", "body": ' + deep + "}")
+    assert last(node).kind == "chat" and isinstance(last(node).body, str)
+    node.state()
+
+
 async def test_content_shed_by_the_reader_is_reported_by_its_length(node):
     await node._on_event({"type": "message_received", "sender": ADA, "content": None,
                           "content_chars": 5_000_000, "message_id": "m-shed", "transport": "ble"})

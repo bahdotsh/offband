@@ -70,6 +70,8 @@ MAX_FILE_CHARS = (MAX_FILE_BYTES + 2) // 3 * 4  # the same limit, as base64
 MAX_BODY_CHARS = 16 * 1024
 MAX_INBOUND_CHARS = 4 * MAX_BODY_CHARS  # the whole envelope, as received
 MAX_NAME_CHARS = 40
+# Deeper bodies are refused: the radar, the inbox and asdict all recurse.
+MAX_BODY_DEPTH = 32
 HELLO_SESSION_WAIT = 4.0
 CREW_WAIT = 20.0
 CREW_SETTLE = 2.5  # lets the room fill in before the creator picks it
@@ -106,6 +108,19 @@ def protected_path(parts: list[str]) -> str | None:
         if part.startswith(".") or part.lower() in PROTECTED_NAMES:
             return part
     return None
+
+
+def nesting_depth(value: Any) -> int:
+    """How deeply lists and objects nest in ``value``, without recursion."""
+    deepest, stack = 0, [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            item = list(item.values())
+        if isinstance(item, list):
+            deepest = max(deepest, depth)
+            stack.extend((child, depth + 1) for child in item)
+    return deepest
 
 
 def short(address: str | None) -> str:
@@ -515,8 +530,8 @@ class Node:
         body = entry.body
         try:
             text = json.dumps(body) if isinstance(body, (dict, list)) else str(body)
-        except (TypeError, ValueError):
-            text = repr(body)
+        except (TypeError, ValueError, RecursionError):
+            text = "[a message the radar cannot show]"
         view["summary"] = text if len(text) <= 240 else text[:237] + "..."
         if entry.kind == "file" and isinstance(body, dict):
             view.pop("body", None)
@@ -1067,7 +1082,9 @@ class Node:
                 body = envelope.get("body")
                 sender_name = envelope.get("from")
                 audience = "all" if envelope.get("to") == "all" else None
-            except ValueError:
+                if nesting_depth(body) > MAX_BODY_DEPTH:
+                    raise ValueError
+            except (ValueError, RecursionError):  # not JSON, or nested too deep
                 kind, body, sender_name, audience = "chat", content, None, None
         if kind not in INBOUND_KINDS:
             kind = "chat"  # an unknown kind, or one only the node may make ("file")
@@ -1141,8 +1158,9 @@ class Node:
             size = len(data)
             try:
                 relative, saved, note = await asyncio.to_thread(self._store_received, sender, name, data)
-            except OSError as exc:
-                relative, note = "/".join(self._clean_relative(name)), f"not saved: {exc.strerror or exc}"
+            except (OSError, ValueError) as exc:  # ValueError: a NUL in the name
+                reason = getattr(exc, "strerror", None) or exc
+                relative, note = "/".join(self._clean_relative(name)), f"not saved: {reason}"
         body: dict[str, Any] = {"path": relative, "bytes": size, "saved_to": str(saved) if saved else None}
         if note:
             body["note"] = note
