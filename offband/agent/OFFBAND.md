@@ -82,8 +82,9 @@ them.
 
 Everything goes in `game/` in the workspace, as plain browser files with no
 build step and no external libraries. The daemon serves that folder at
-`http://127.0.0.1:<port>/game/`, and the page reaches the link through
-`/offband.js`.
+`http://localhost:<port>/game/`, and the page reaches the link through
+`/offband.js`. That origin serves only the game: the page cannot call the
+rest of the agent API, and must not try.
 
 ### The default split
 

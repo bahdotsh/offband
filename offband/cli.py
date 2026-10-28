@@ -70,7 +70,7 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
             return 1
         start.result()
         log.info("%s is %s", args.name, node.address)
-        log.info("radar: http://127.0.0.1:%d/   game: http://127.0.0.1:%d/game/", args.port, args.port)
+        log.info("radar: http://127.0.0.1:%d/   game: http://localhost:%d/game/", args.port, args.port)
         game_dir = Path(args.game_dir).resolve() if args.game_dir else None
         web = asyncio.create_task(serve(node, args.port, game_dir))
         lost = asyncio.create_task(node.api.closed.wait())
@@ -188,7 +188,7 @@ def init_workspace(workspace: Path, name: str, port: int, quiet: bool = False) -
         f"{MARK_START}\n"
         f"You are {name}, an Offband agent. Read OFFBAND.md and follow it.\n\n"
         f"- Your radar: http://127.0.0.1:{port}/\n"
-        f"- The game, once built: http://127.0.0.1:{port}/game/\n"
+        f"- The game, once built: http://localhost:{port}/game/\n"
         f"{MARK_END}\n"
     )
     text = claude_md.read_text() if claude_md.exists() else ""

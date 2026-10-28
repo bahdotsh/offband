@@ -78,7 +78,7 @@ cd ~/linus && claude  # the same as Grace
 The lead plans for every agent it finds, so start the followers first, or
 tell the lead how many agents there are.
 
-The game the agents build is served at <http://127.0.0.1:7777/game/>. With
+The game the agents build is served at <http://localhost:7777/game/>. With
 more than two machines, the page asks whom to play, or open
 `/game/?vs=Grace`.
 
@@ -257,10 +257,14 @@ that, it keeps a stray device or a hostile peer from doing much harm:
 - **The agent sends only workspace files.** `send_file` refuses a path
   outside the workspace, a dot path such as `.env`, and the agent's own
   instruction files, so a prompt or page cannot make it ship `~/.ssh/`.
+- **The game runs on its own origin.** Peers write the game, so it is
+  served at `http://localhost:<port>/game/`, which offers only the game,
+  `/offband.js` and the game channel. The radar and the agent API are on
+  `http://127.0.0.1:<port>`, a different origin a game page cannot call.
 - **The daemon binds 127.0.0.1 only.** Every request needs a loopback Host
   header, which stops DNS rebinding. Every `/api/` request also needs the
   header `X-Offband: 1`, reads included, since reading the inbox consumes
-  it. A cross-site page can only send that header after a CORS preflight
+  it. A client of the API other than the MCP server must send it too. A cross-site page can only send that header after a CORS preflight
   the daemon never answers. The two event streams are exempt because
   `EventSource` cannot set headers; they only read, and a cross-site page
   cannot read their responses.

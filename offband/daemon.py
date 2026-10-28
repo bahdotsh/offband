@@ -9,7 +9,11 @@
     /api/game/stream  game moves from the peer, as server-sent events
 
 Loopback only. Every request needs a loopback Host header, which stops DNS
-rebinding. Every /api/ request also needs ``X-Offband: 1``, a header a
+rebinding. The game is written by peers, so it is served on its own origin,
+``http://localhost:<port>``, which has only the game, ``/offband.js`` and
+the ``/api/game`` routes; ``/game/`` on 127.0.0.1 redirects there. The
+radar and the rest of the API stay on ``http://127.0.0.1:<port>``, where a
+game page cannot reach them. Every /api/ request also needs ``X-Offband: 1``, a header a
 cross-site page can only send after a CORS preflight this server never
 answers; that covers GETs too, because some of them have effects (reading
 the inbox consumes it). The two event streams are exempt, because
@@ -40,9 +44,24 @@ from .rpc import RpcError
 logger = logging.getLogger(__name__)
 
 WEB = Path(__file__).parent / "web"
-LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+# The radar and the agent's API live on the control origin. The game, which
+# is written by peers, lives on the game origin: a different host on the
+# same port is a different origin, so a game page cannot call the API.
+CONTROL_HOSTS = {"127.0.0.1", "[::1]"}
+GAME_HOST = "localhost"
+LOOPBACK_HOSTS = CONTROL_HOSTS | {GAME_HOST}
+GAME_API = {"/api/game", "/api/game/send", "/api/game/stream"}
 UNGUARDED_API = {"/api/stream", "/api/game/stream"}
 FONTS = {"FamiljenGrotesk.woff2", "JetBrainsMono.woff2"}
+
+
+def is_game_page(path: str) -> bool:
+    return path == "/game" or path.startswith("/game/")
+
+
+def on_game_origin(path: str) -> bool:
+    """What the game origin serves: the game, its bridge and its channel."""
+    return is_game_page(path) or path == "/offband.js" or path in GAME_API
 
 
 def host_name(host: str) -> str:
@@ -60,10 +79,20 @@ class Guard:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
             headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
-            if host_name(headers.get("host", "")) not in LOOPBACK_HOSTS:
+            host = host_name(headers.get("host", ""))
+            if host not in LOOPBACK_HOSTS:
                 await PlainTextResponse("forbidden host", status_code=403)(scope, receive, send)
                 return
             path = scope.get("path", "")
+            if host == GAME_HOST and not on_game_origin(path):
+                await PlainTextResponse("not on the game origin", status_code=404)(scope, receive, send)
+                return
+            if host != GAME_HOST and is_game_page(path):
+                port = (scope.get("server") or ("", 0))[1]
+                query = scope.get("query_string", b"").decode("latin-1")
+                location = f"http://{GAME_HOST}:{port}{path}" + (f"?{query}" if query else "")
+                await Response(status_code=307, headers={"Location": location})(scope, receive, send)
+                return
             needs_header = path.startswith("/api/") and path not in UNGUARDED_API
             if (needs_header or scope["method"] not in ("GET", "HEAD")) and headers.get("x-offband") != "1":
                 await PlainTextResponse("missing X-Offband header", status_code=403)(scope, receive, send)

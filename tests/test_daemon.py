@@ -33,16 +33,22 @@ async def test_the_game_route_stays_inside_the_game_folder(client, node):
     (node.workspace / "game" / "index.html").write_text("<p>game</p>")
     (node.workspace / "game-secret").mkdir()
     (node.workspace / "game-secret" / "x.txt").write_text("SECRET")
-    assert (await client.get("/game/")).text == "<p>game</p>"
+    async with game_client(node) as game:
+        assert (await game.get("/game/")).text == "<p>game</p>"
     # httpx normalises "..", so hand the app the raw path, as curl --path-as-is does.
-    status, body = await raw_get(build_app(node), "/game/../game-secret/x.txt")
+    status, body = await raw_get(build_app(node), "/game/../game-secret/x.txt", host=b"localhost:7777")
     assert status == 404 and b"SECRET" not in body
 
 
-async def raw_get(app, path: str) -> tuple[int, bytes]:
+def game_client(node) -> httpx.AsyncClient:
+    transport = httpx.ASGITransport(app=build_app(node))
+    return httpx.AsyncClient(transport=transport, base_url="http://localhost:7777")
+
+
+async def raw_get(app, path: str, host: bytes = b"127.0.0.1:7777") -> tuple[int, bytes]:
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
              "scheme": "http", "path": path, "raw_path": path.encode(), "root_path": "", "query_string": b"",
-             "headers": [(b"host", b"127.0.0.1:7777")], "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 7777)}
+             "headers": [(b"host", host)], "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 7777)}
     out: dict[str, Any] = {"body": b""}
 
     async def receive():
@@ -86,3 +92,22 @@ async def test_only_loopback_hosts_get_in():
 async def test_waits_must_be_finite(client, wait):
     r = await client.get(f"/api/peers?wait={wait}", headers={"X-Offband": "1"})
     assert r.status_code == 400 and "finite" in r.json()["error"]
+
+
+async def test_a_game_page_cannot_reach_the_agent_api(node):
+    """Peers write the game, so its origin offers the game channel only."""
+    async with game_client(node) as game:
+        for path in ("/api/inbox", "/api/state", "/api/send_file", "/api/stream", "/"):
+            r = await game.get(path, headers={"X-Offband": "1"})
+            assert r.status_code == 404, path
+        r = await game.post("/api/send", json={"kind": "chat", "body": "hi"}, headers={"X-Offband": "1"})
+        assert r.status_code == 404
+        assert (await game.get("/api/game", headers={"X-Offband": "1"})).status_code == 200
+        assert (await game.get("/offband.js")).status_code == 200
+
+
+async def test_the_game_moves_off_the_control_origin(client):
+    r = await client.get("/game/?vs=Grace")
+    assert r.status_code == 307
+    assert r.headers["location"] == "http://localhost:7777/game/?vs=Grace"
+    assert (await client.get("/game")).headers["location"] == "http://localhost:7777/game"
