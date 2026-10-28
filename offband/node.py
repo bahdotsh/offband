@@ -958,6 +958,10 @@ class Node:
         if peer:
             peer.nearby = False
             peer.hello_sent = False
+            # Its crew claim lapses with it: a peer that left (or lied about
+            # a crew) must not stop this node from ever making one. Its next
+            # hello says again where it stands.
+            peer.crew = None
             self._emit({"t": "peer", "peer": peer.view()})
 
     async def _ev_secure_session_established(self, event: dict[str, Any]) -> None:

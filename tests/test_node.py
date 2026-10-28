@@ -158,3 +158,11 @@ async def test_a_file_shed_by_the_reader_is_refused_by_its_length(node):
                           "file_data_chars": 10 * 1024 * 1024, "file_id": "f-shed"})
     body = last(node).body
     assert body["note"].startswith("refused") and body["bytes"] == 10 * 1024 * 1024 * 3 // 4
+
+
+async def test_a_crew_claim_lapses_when_the_peer_leaves(node):
+    node.address = "off1" + "0" * 40
+    await receive(node, BOB, envelope("hello", {"name": "Bob", "crew": "group-1"}, name="Bob"))
+    assert not node._creator()
+    await node._on_event({"type": "neighbor_lost", "peer_id": BOB})
+    assert node._creator()
