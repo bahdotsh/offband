@@ -11,7 +11,9 @@ ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/offband-spike")
 
 async def main():
     a = ServiceSpec(ROOT / "a", transport="lan", listen="127.0.0.1:7901", peers=["127.0.0.1:7902"])
-    b = ServiceSpec(ROOT / "b", transport="lan", listen="127.0.0.1:7902", peers=["127.0.0.1:7901"])
+    # Only one side dials: two nodes dialling each other at once can lose
+    # the first key exchange (README, Known issues).
+    b = ServiceSpec(ROOT / "b", transport="lan", listen="127.0.0.1:7902", peers=[])
     pa, pb = a.spawn(), b.spawn()
     try:
         ca, cb = LocalApi(str(a.socket_path), "offband"), LocalApi(str(b.socket_path), "offband")
