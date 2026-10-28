@@ -1,0 +1,42 @@
+:root {
+  --bg: #e6ecef;
+  --ink: #142230;
+  --soft: #5b6b78;
+  --frame: #1f56e0;
+  --hole: #e6ecef;
+  --one: #e8b10d;
+  --two: #c2412f;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink);
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  display: grid; place-items: center; padding: 16px;
+}
+main { width: min(720px, 100%); }
+header { margin-bottom: 16px; }
+.players { font-size: 28px; font-weight: 700; margin: 0; }
+.p1 { color: #a07800; }
+.p2 { color: var(--two); }
+.status { font-size: 22px; color: var(--soft); margin: 4px 0 0; min-height: 1.4em; }
+.status.go { color: var(--ink); font-weight: 600; }
+.board {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px;
+  background: var(--frame); padding: 12px; border-radius: 14px;
+}
+.cell {
+  aspect-ratio: 1; border-radius: 50%; background: var(--hole); border: none; padding: 0;
+  cursor: pointer;
+}
+.cell:disabled { cursor: default; }
+.cell:focus-visible { outline: 4px solid #fff; outline-offset: 2px; }
+.cell.p1 { background: var(--one); }
+.cell.p2 { background: var(--two); }
+.cell.last { box-shadow: inset 0 0 0 5px rgba(255, 255, 255, 0.75); }
+.cell.drop { animation: drop 280ms ease-in; }
+@keyframes drop { from { transform: translateY(-260%); } to { transform: translateY(0); } }
+button#again {
+  margin-top: 16px; font-size: 20px; padding: 10px 20px; border-radius: 8px;
+  border: none; background: var(--ink); color: #fff; cursor: pointer;
+}
+@media (prefers-reduced-motion: reduce) { .cell.drop { animation: none; } }

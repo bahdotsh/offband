@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Four over Offband</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="players"><span class="p1" id="p1">…</span> against <span class="p2" id="p2">…</span></p>
+    <p class="status" id="status" aria-live="polite">Connecting to the other laptop</p>
+  </header>
+  <div class="board" id="board" role="grid" aria-label="Connect Four board"></div>
+  <button id="again" type="button" hidden>Play again</button>
+</main>
+<script src="/offband.js"></script>
+<script src="engine.js"></script>
+<script src="ui.js"></script>
+</body>
+</html>

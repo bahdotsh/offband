@@ -22,6 +22,8 @@ from . import APP_ID, __version__
 from .service import ServiceSpec, default_home
 
 AGENT_DIR = Path(__file__).parent / "agent"
+MARK_START = "<!-- offband -->"
+MARK_END = "<!-- /offband -->"
 
 
 def _add_up_args(p: argparse.ArgumentParser) -> None:
@@ -140,10 +142,20 @@ def init_workspace(workspace: Path, name: str, port: int, quiet: bool = False) -
     (workspace / ".mcp.json").write_text(json.dumps(mcp, indent=2) + "\n")
     shutil.copyfile(AGENT_DIR / "OFFBAND.md", workspace / "OFFBAND.md")
     claude_md = workspace / "CLAUDE.md"
-    pointer = f"You are {name}, an Offband agent. Read OFFBAND.md and follow it.\n"
-    if not claude_md.exists() or "OFFBAND.md" not in claude_md.read_text():
-        with claude_md.open("a") as handle:
-            handle.write(pointer)
+    block = (
+        f"{MARK_START}\n"
+        f"You are {name}, an Offband agent. Read OFFBAND.md and follow it.\n\n"
+        f"- Your radar: http://127.0.0.1:{port}/\n"
+        f"- The game, once built: http://127.0.0.1:{port}/game/\n"
+        f"{MARK_END}\n"
+    )
+    text = claude_md.read_text() if claude_md.exists() else ""
+    if MARK_START in text and MARK_END in text:
+        head, rest = text.split(MARK_START, 1)
+        text = head + block + rest.split(MARK_END, 1)[1].lstrip("\n")
+    else:
+        text = (text + "\n" if text and not text.endswith("\n") else text) + block
+    claude_md.write_text(text)
     settings_dir = workspace / ".claude"
     settings_dir.mkdir(exist_ok=True)
     settings = settings_dir / "settings.json"
