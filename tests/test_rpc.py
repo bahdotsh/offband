@@ -63,3 +63,12 @@ def test_a_file_over_the_limit_is_shed_before_it_is_queued():
     assert api._shed(small) is small
     other = {"type": "message_received", "file_data": "A" * 12}
     assert api._shed(other) is other
+
+
+def test_message_content_over_the_limit_is_shed_before_it_is_queued():
+    api = LocalApi("/nowhere", "offband")
+    api.max_content_chars = 8
+    big = api._shed({"type": "message_received", "content": "x" * 12})
+    assert big["content"] is None and big["content_chars"] == 12
+    small = {"type": "message_received", "content": "hi"}
+    assert api._shed(small) is small

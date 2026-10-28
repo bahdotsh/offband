@@ -62,6 +62,9 @@ class LocalApi:
         # ``file_data_chars``: the handler refuses it by size, and the queue
         # never holds a payload that will be thrown away.
         self.max_file_chars: int | None = None
+        # The same for a message_received event's content, its length kept
+        # in ``content_chars``.
+        self.max_content_chars: int | None = None
         self.closed = asyncio.Event()
 
     async def connect(self, timeout: float = 60.0) -> dict[str, Any]:
@@ -115,13 +118,20 @@ class LocalApi:
             self.closed.set()
 
     def _shed(self, event: dict[str, Any]) -> dict[str, Any]:
-        """Drops a file payload over ``max_file_chars`` before it is queued.
-        The reader must never block (it also routes responses), so the queue
-        is unbounded; shedding here keeps it from holding large files."""
-        data = event.get("file_data")
-        if (self.max_file_chars is not None and event.get("type") == "file_received"
-                and isinstance(data, str) and len(data) > self.max_file_chars):
-            event = {**event, "file_data": None, "file_data_chars": len(data)}
+        """Drops a file payload over ``max_file_chars``, or message content
+        over ``max_content_chars``, before the event is queued. The reader
+        must never block (it also routes responses), so the queue is
+        unbounded; shedding here keeps it from holding large payloads."""
+        kind = event.get("type")
+        if kind == "file_received":
+            field, limit = "file_data", self.max_file_chars
+        elif kind == "message_received":
+            field, limit = "content", self.max_content_chars
+        else:
+            return event
+        value = event.get(field)
+        if limit is not None and isinstance(value, str) and len(value) > limit:
+            event = {**event, field: None, f"{field}_chars": len(value)}
         return event
 
     async def _dispatch(self, events: asyncio.Queue[dict[str, Any] | None]) -> None:

@@ -206,3 +206,9 @@ async def test_a_crew_that_takes_in_an_outsider_is_left(tmp_path):
     assert n.crew is None and n.crew_members == []
     for task in list(n._tasks):
         task.cancel()
+
+
+async def test_content_shed_by_the_reader_is_reported_by_its_length(node):
+    await node._on_event({"type": "message_received", "sender": ADA, "content": None,
+                          "content_chars": 5_000_000, "message_id": "m-shed", "transport": "ble"})
+    assert "5000000 chars" in last(node).body

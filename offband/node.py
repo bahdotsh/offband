@@ -219,6 +219,7 @@ class Node:
         self.api.on_event = self._on_event
         # Larger files are refused anyway: let the reader drop their bytes.
         self.api.max_file_chars = MAX_FILE_CHARS
+        self.api.max_content_chars = MAX_INBOUND_CHARS
         hello = await self.api.connect()
         self.address = hello.get("local_address")
         await self.api.call("subscribe", {"types": "all"})
@@ -1051,9 +1052,12 @@ class Node:
         peer = self._touch_peer(sender, transport)
         content = event.get("content")
         content = content if isinstance(content, str) else ""
-        if len(content) > MAX_INBOUND_CHARS:
-            logger.warning("dropped a %d-char message from %s", len(content), short(sender))
-            kind, body, sender_name, audience = "chat", f"[a message of {len(content)} chars, too long to show]", None, None
+        # The rpc reader drops oversized content and keeps only its length.
+        shed = event.get("content_chars")
+        chars = shed if isinstance(shed, int) else len(content)
+        if chars > MAX_INBOUND_CHARS:
+            logger.warning("dropped a %d-char message from %s", chars, short(sender))
+            kind, body, sender_name, audience = "chat", f"[a message of {chars} chars, too long to show]", None, None
         else:
             try:
                 envelope = json.loads(content)
