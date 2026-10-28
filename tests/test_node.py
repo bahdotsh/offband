@@ -171,3 +171,11 @@ async def test_a_crew_claim_lapses_when_the_peer_leaves(node):
 async def test_files_without_an_id_are_dropped(node):
     await node._on_event({"type": "file_received", "sender": ADA, "file_name": "a.txt", "file_data": "eA=="})
     assert not node.log
+
+
+async def test_the_allowlist_also_holds_for_sending(tmp_path):
+    n = Node(FakeApi(), "Me", tmp_path, allow=[ADA])  # type: ignore[arg-type]
+    n.address = ME
+    assert n.resolve_peer(ADA) == ADA
+    with pytest.raises(NodeError, match="allow"):
+        n.resolve_peer(EVE)

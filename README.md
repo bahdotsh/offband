@@ -133,8 +133,8 @@ its own at start):
 offband up --name Ada --workspace ~/ada --allow off1... --allow off1...
 ```
 
-Everything from any other address is then dropped, and a crew that holds
-one is never adopted.
+Everything from any other address is then dropped, the node will not send
+to one, and a crew that holds one is never adopted.
 
 ## How it works
 

@@ -409,6 +409,8 @@ class Node:
         if len(matches) == 1:
             return matches[0]
         if peer.startswith("off1"):
+            if not self.admitted(peer):
+                raise NodeError(f"{short(peer)} is not on this node's --allow list.")
             return peer  # not heard yet; the engine holds the message until it is
         raise NodeError(f"No nearby peer called {peer!r}.")
 
