@@ -100,6 +100,13 @@ or headless, timed, with logs:
 scripts/headless_rehearsal.sh ./rehearsal
 ```
 
+One headless run on 2026-10-28, over loopback: the agents went from first
+prompt to both sending `done` in 237 seconds, with every message delivered.
+They followed the protocol step for step: propose, accept, one file each
+way, a review each way, and both board tasks done. Their game was then
+played to a win across the two pages. The two agents together cost about
+3.3 USD at list price.
+
 When the game exists, open `http://127.0.0.1:7777/game/` and
 `http://127.0.0.1:7778/game/` and play.
 

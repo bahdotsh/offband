@@ -110,4 +110,5 @@ The wire messages are exactly these:
 The UI shows whose turn it is, both names (`link.me.name`, `link.peer.name`),
 the winner, and a "Play again" button that sends `reset`. Keep it readable on
 a screen recording: a large board, high contrast, player 1 and player 2 in
-two clearly different colors.
+two clearly different colors. Do not name the carrier (Bluetooth, Wi-Fi) in
+the page: the radar shows the real one, and the page cannot know it.
