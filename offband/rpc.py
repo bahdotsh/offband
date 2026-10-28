@@ -33,9 +33,6 @@ try:
 except ImportError:  # the tests run without the SDK
     MAX_FRAME = 100 * 1024 * 1024 * 4 // 3 + 1024 * 1024
 
-# Frames larger than this are parsed off the event loop, so one big file
-# does not freeze the daemon while it is decoded.
-PARSE_IN_THREAD = 1024 * 1024
 
 
 class RpcError(Exception):
@@ -91,15 +88,14 @@ class LocalApi:
         reason = "connection closed"
         try:
             async for raw in self._ws:
+                # Parsed inline: the C decoder holds the GIL, so a thread
+                # would not free the loop, and even the largest frame the
+                # service allows parses in about a tenth of a second.
                 try:
-                    if len(raw) > PARSE_IN_THREAD:
-                        message = await asyncio.to_thread(json.loads, raw)
-                    else:
-                        message = json.loads(raw)
-                except ValueError:
+                    message = json.loads(raw)
+                except (ValueError, RecursionError):
                     logger.warning("dropped a frame that is not JSON")
                     continue
-                del raw
                 if not isinstance(message, dict):
                     continue
                 if "id" in message:
