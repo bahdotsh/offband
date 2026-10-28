@@ -64,7 +64,7 @@ class ServiceSpec:
     listen: str | None = None
     peers: list[str] = field(default_factory=list)
     lan_discovery: bool = False
-    log_level: str = "INFO"
+    log_level: str = os.environ.get("OFFBAND_SERVICE_LOG", "INFO")
 
     @property
     def socket_path(self) -> Path:

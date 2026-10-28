@@ -1,0 +1,145 @@
+"""offband-mcp: the agent's tools, over MCP stdio.
+
+A thin front over the daemon's loopback API. The daemon owns the SDK
+connection, the message log and the radar, so restarting the agent loses
+nothing and the radar keeps running.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import urllib.error
+import urllib.request
+from typing import Any
+
+from mcp.server.mcpserver import MCPServer
+
+INSTRUCTIONS = """\
+Offband connects you to other coding agents nearby, over Bluetooth, end-to-end
+encrypted (MLS), with no server in between. Everything you send reaches only
+the peer you name.
+
+Typical flow: announce, then peers(wait_seconds=30) to find your partner.
+Plan on the shared board (board_update), agree with propose/accept messages,
+send the files you own with send_file, and wait for replies with
+inbox(wait_seconds=...) instead of polling in a loop. Keep messages short:
+they show on the radar screen as they fly between the machines.
+Read the Offband agent protocol (OFFBAND.md in the workspace) for the roles,
+message kinds and the game contract.
+"""
+
+server = MCPServer(name="offband", instructions=INSTRUCTIONS)
+
+
+def _base() -> str:
+    return os.environ.get("OFFBAND_URL", "http://127.0.0.1:7777").rstrip("/")
+
+
+def _request(method: str, path: str, body: dict[str, Any] | None, timeout: float) -> Any:
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(_base() + path, data=data, method=method)
+    req.add_header("X-Offband", "1")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read()).get("error")
+        except ValueError:
+            detail = exc.reason
+        return {"error": detail}
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+        return {"error": f"The Offband daemon at {_base()} is not reachable ({exc}). Start it with `offband up`."}
+
+
+async def _call(method: str, path: str, body: dict[str, Any] | None = None, timeout: float = 30.0) -> Any:
+    return await asyncio.to_thread(_request, method, path, body, timeout)
+
+
+@server.tool()
+async def peers(wait_seconds: float = 0) -> dict[str, Any]:
+    """List nearby devices and agents: name, address, transport (BLE or LAN),
+    signal strength, and whether the encrypted session is up
+    (session == "SessionConfirmed"). With wait_seconds > 0, waits until at
+    least one agent is ready."""
+    wait = max(0.0, min(float(wait_seconds), 120.0))
+    return await _call("GET", f"/api/peers?wait={wait}", timeout=wait + 15)
+
+
+@server.tool()
+async def send(kind: str, body: Any, peer: str | None = None) -> dict[str, Any]:
+    """Send an end-to-end encrypted message to a nearby agent.
+
+    kind: propose | accept | counter | task | review | question | chat | done
+    body: a short string, or a small JSON object (max 16 KiB). Code goes in
+          files, with send_file, never in a message.
+    peer: the agent's name or address; omit when there is one partner.
+
+    Waits a few seconds for the peer's acknowledgement and reports
+    status "delivered" with the transport and latency, or "sent" when the SDK
+    is still retrying (it keeps retrying; no need to resend)."""
+    return await _call("POST", "/api/send", {"peer": peer, "kind": kind, "body": body})
+
+
+@server.tool()
+async def inbox(wait_seconds: float = 60) -> dict[str, Any]:
+    """New messages from other agents since the last call (each returned
+    once). Blocks up to wait_seconds for the first one, so call it instead of
+    sleeping. Also reports board_changed when the partner edited the board.
+    File transfers appear as kind "file" with the path they were saved to."""
+    wait = max(0.0, min(float(wait_seconds), 300.0))
+    return await _call("GET", f"/api/inbox?wait={wait}", timeout=wait + 15)
+
+
+@server.tool()
+async def board_get(peer: str | None = None) -> dict[str, Any]:
+    """Read the task board shared with your partner: notes (plan, contract)
+    and tasks (id, title, owner, status, files). Both agents hold a replica
+    and edits merge over the link."""
+    query = f"?peer={peer}" if peer else ""
+    return await _call("GET", f"/api/board{query}")
+
+
+@server.tool()
+async def board_update(
+    tasks: list[dict[str, Any]] | None = None,
+    notes: dict[str, str] | None = None,
+    remove: list[str] | None = None,
+    peer: str | None = None,
+) -> dict[str, Any]:
+    """Edit the shared board. tasks: a list of task patches merged by id,
+    e.g. [{"id": "engine", "title": "Game rules", "owner": "Ada",
+    "status": "doing", "files": ["game/engine.js"]}]. Status is one of
+    todo | doing | review | done. notes: named text blocks such as "plan" or
+    "contract" (whole value replaced). remove: task ids to delete.
+    Edit only tasks you own, except to claim one the plan gave you."""
+    return await _call("POST", "/api/board", {"peer": peer, "tasks": tasks, "notes": notes, "remove": remove})
+
+
+@server.tool()
+async def send_file(path: str, peer: str | None = None) -> dict[str, Any]:
+    """Send one file (max 256 KiB) to your partner, encrypted. A path relative
+    to the workspace keeps its place: the partner receives it at the same
+    relative path in their workspace. Send only files you own."""
+    return await _call("POST", "/api/send_file", {"peer": peer, "path": path}, timeout=60)
+
+
+@server.tool()
+async def announce(capabilities: dict[str, str] | None = None) -> dict[str, Any]:
+    """Advertise this agent to nearby devices, with optional capabilities
+    such as {"role": "lead", "skills": "game logic, UI"}. These are visible
+    on the air in plaintext (signed, not encrypted): names and skills only,
+    never content."""
+    return await _call("POST", "/api/announce", {"capabilities": capabilities or {}})
+
+
+def main() -> None:
+    server.run()
+
+
+if __name__ == "__main__":
+    main()
