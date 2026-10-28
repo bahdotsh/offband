@@ -254,6 +254,9 @@ that, it keeps a stray device or a hostile peer from doing much harm:
   `CLAUDE.local.md`, `OFFBAND.md` or `AGENTS.md`. Those land in
   `.offband/received/<sender>/` and the inbox says so. Paths with `..` or
   absolute paths are reduced to their file name.
+- **The agent sends only workspace files.** `send_file` refuses a path
+  outside the workspace, a dot path such as `.env`, and the agent's own
+  instruction files, so a prompt or page cannot make it ship `~/.ssh/`.
 - **The daemon binds 127.0.0.1 only.** Every request needs a loopback Host
   header, which stops DNS rebinding. Every `/api/` request also needs the
   header `X-Offband: 1`, reads included, since reading the inbox consumes

@@ -225,3 +225,25 @@ async def test_content_shed_by_the_reader_is_reported_by_its_length(node):
     await node._on_event({"type": "message_received", "sender": ADA, "content": None,
                           "content_chars": 5_000_000, "message_id": "m-shed", "transport": "ble"})
     assert "5000000 chars" in last(node).body
+
+
+async def test_send_file_refuses_a_path_outside_the_workspace(node, tmp_path):
+    await receive(node, ADA, envelope("hello", {"name": "Ada"}))
+    secret = tmp_path / "id_ed25519"
+    secret.write_text("PRIVATE KEY")
+    with pytest.raises(NodeError, match="inside the workspace"):
+        await node.send_file(ADA, str(secret))
+    (node.workspace / "link").symlink_to(secret)
+    with pytest.raises(NodeError, match="inside the workspace"):
+        await node.send_file(ADA, "link")
+    assert not [c for c in node.api.calls if c[0] == "send_file"]
+
+
+@pytest.mark.parametrize("name", [".env", ".claude/settings.local.json", "CLAUDE.md"])
+async def test_send_file_refuses_the_agents_private_files(node, name):
+    await receive(node, ADA, envelope("hello", {"name": "Ada"}))
+    target = node.workspace / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("secret")
+    with pytest.raises(NodeError, match="private"):
+        await node.send_file(ADA, name)

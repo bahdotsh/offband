@@ -130,8 +130,9 @@ async def board_update(
 async def send_file(path: str, peer: str | None = None) -> dict[str, Any]:
     """Send one file (max 256 KiB), encrypted, to every agent nearby, or to
     the one peer named. A path relative to the workspace keeps its place:
-    each agent receives it at the same relative path in its workspace. Send
-    only files you own."""
+    each agent receives it at the same relative path in its workspace. Only
+    files inside the workspace can be sent, never dot files such as .env or
+    .claude/, nor CLAUDE.md or OFFBAND.md. Send only files you own."""
     return await _call("POST", "/api/send_file", {"peer": peer, "path": path}, timeout=60)
 
 

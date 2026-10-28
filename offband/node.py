@@ -589,6 +589,17 @@ class Node:
                 raise NodeError("Give an absolute path; this node has no workspace.")
             source = self.workspace / source
         source = source.resolve()
+        if self.workspace is not None:
+            # Only files of the workspace, and never its dot files or the
+            # agent's own instructions: a page or prompt that talks the agent
+            # into sending ~/.ssh/... or .env gets a refusal.
+            try:
+                inside = source.relative_to(self.workspace)
+            except ValueError:
+                raise NodeError(f"send_file sends only files inside the workspace ({self.workspace}).") from None
+            blocked = protected_path(list(inside.parts))
+            if blocked is not None:
+                raise NodeError(f"{inside.as_posix()} is not sent: {blocked!r} is private to this agent.")
         if not source.is_file():
             raise NodeError(f"No such file: {source}")
         data = source.read_bytes()
