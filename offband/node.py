@@ -1093,9 +1093,9 @@ class Node:
             self._append(entry)
 
     async def _ev_file_received(self, event: dict[str, Any]) -> None:
-        file_id = event.get("file_id") or ""
-        if file_id in self._seen_ids:
-            return
+        file_id = event.get("file_id")
+        if not isinstance(file_id, str) or not file_id or file_id in self._seen_ids:
+            return  # no id to dedupe on, or a replay after a reconnect
         self._seen_ids.add(file_id)
         sender = event.get("sender")
         if not isinstance(sender, str) or not sender:

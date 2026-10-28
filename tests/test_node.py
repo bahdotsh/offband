@@ -166,3 +166,8 @@ async def test_a_crew_claim_lapses_when_the_peer_leaves(node):
     assert not node._creator()
     await node._on_event({"type": "neighbor_lost", "peer_id": BOB})
     assert node._creator()
+
+
+async def test_files_without_an_id_are_dropped(node):
+    await node._on_event({"type": "file_received", "sender": ADA, "file_name": "a.txt", "file_data": "eA=="})
+    assert not node.log
