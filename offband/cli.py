@@ -95,12 +95,17 @@ def reset_home(home: Path) -> None:
     """Deletes a node home, so the node starts with a new identity and none
     of the last run's crew or board. Refuses a directory that does not look
     like a node home, so a mistyped --home never deletes anything else."""
+    if home.is_symlink():
+        # rmtree refuses a link, and following it would delete its target.
+        raise SystemExit(f"--fresh: {home} is a symbolic link; give the real directory with --home")
     if not home.exists():
         return
     markers = ("config.json", "store.key", "keys", "state")
     if not home.is_dir() or not any((home / m).exists() for m in markers):
         raise SystemExit(f"--fresh: {home} is not an Offband node home; not deleting it")
-    unexpected = [p.name for p in home.iterdir() if p.name not in markers + ("service.log", "service.log.1")]
+    # Finder drops .DS_Store into any folder it shows; it is not user data.
+    tolerated = markers + ("service.log", "service.log.1", ".DS_Store")
+    unexpected = [p.name for p in home.iterdir() if p.name not in tolerated]
     if unexpected:
         raise SystemExit(f"--fresh: {home} holds files Offband did not make ({', '.join(unexpected)}); not deleting it")
     shutil.rmtree(home)

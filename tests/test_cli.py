@@ -40,3 +40,21 @@ def test_allow_needs_full_addresses():
     assert cli._check_allow([ADA]) is None
     assert cli._check_allow(["off1"]) is not None
     assert cli._check_allow(["Ada"]) is not None
+
+
+def test_fresh_tolerates_finder_metadata(tmp_path):
+    home = tmp_path / "ada"
+    (home / "keys").mkdir(parents=True)
+    (home / ".DS_Store").write_bytes(b"\0")
+    cli.reset_home(home)
+    assert not home.exists()
+
+
+def test_fresh_refuses_a_symlinked_home(tmp_path):
+    real = tmp_path / "real"
+    (real / "keys").mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    with pytest.raises(SystemExit, match="symbolic link"):
+        cli.reset_home(link)
+    assert (real / "keys").exists()
