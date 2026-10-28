@@ -666,6 +666,7 @@ class Node:
         except (RpcError, ConnectionError):
             return
         best: tuple[Any, ...] | None = None
+        refused: set[str] = set()
         for group_id in group_ids or []:
             gid = group_id if isinstance(group_id, str) else (group_id or {}).get("group_id")
             if not gid:
@@ -678,10 +679,18 @@ class Node:
                 continue
             members = list(info.get("members") or [])
             if not all(m == self.address or self.admitted(m) for m in members):
-                continue  # made or joined by a peer outside the allowlist
+                refused.add(gid)  # made or joined by a peer outside the allowlist
+                continue
             key = (-len(members), gid, members)
             if best is None or key[:2] < best[:2]:
                 best = key
+        if self.crew in refused:
+            # The crew we use took in a peer outside the allowlist (another
+            # member invited it): stop writing the board where it can read.
+            logger.warning("crew %s now holds a peer outside --allow; leaving it", self.crew)
+            self.crew, self.crew_members = None, []
+            self._emit({"t": "crew", "crew": None})
+            await self._notify()
         if best is None:
             return
         _, gid, members = best
@@ -747,7 +756,9 @@ class Node:
         """The crew's group id. With ``create``, makes the crew when there
         is none (and raises NodeError when no agent is nearby to share it)."""
         async with self._crew_lock:
-            if self.crew is None:
+            # With an allowlist, the crew is checked on every use: another
+            # member may have let an outsider in since it was adopted.
+            if self.crew is None or self.allow is not None:
                 await self._load_crew()
             if self.crew is None:
                 if not create:

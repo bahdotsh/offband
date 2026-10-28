@@ -179,3 +179,30 @@ async def test_the_allowlist_also_holds_for_sending(tmp_path):
     assert n.resolve_peer(ADA) == ADA
     with pytest.raises(NodeError, match="allow"):
         n.resolve_peer(EVE)
+
+
+# ------------------------------------------------- review follow-ups
+
+async def test_a_crew_that_takes_in_an_outsider_is_left(tmp_path):
+    """--allow must hold after adoption: another member may invite anyone."""
+
+    class Api(FakeApi):
+        members = [ME, ADA]
+
+        async def call(self, method, params=None, timeout=60.0):
+            if method == "list_groups":
+                return ["g1"]
+            if method == "get_group_info":
+                return {"name": "offband-crew", "members": list(self.members)}
+            return await super().call(method, params, timeout)
+
+    api = Api()
+    n = Node(api, "Me", tmp_path, allow=[ADA])  # type: ignore[arg-type]
+    n.address = ME
+    await n._load_crew()
+    assert n.crew == "g1"
+    api.members = [ME, ADA, EVE]
+    assert await n._ensure_crew(create=False) is None
+    assert n.crew is None and n.crew_members == []
+    for task in list(n._tasks):
+        task.cancel()

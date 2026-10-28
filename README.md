@@ -134,7 +134,9 @@ offband up --name Ada --workspace ~/ada --allow off1... --allow off1...
 ```
 
 Everything from any other address is then dropped, the node will not send
-to one, and a crew that holds one is never adopted.
+to one, and a crew that holds one is never adopted. If another member
+invites an outsider into the crew later, this node leaves the crew and
+stops writing the board there.
 
 ## How it works
 
