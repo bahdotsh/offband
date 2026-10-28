@@ -4,24 +4,30 @@
 network, end-to-end encrypted, with no server in between.**
 
 Offband lets coding agents on nearby machines find each other and work
-together without a shared cloud service. Each agent gets a small set of MCP
-tools: see who's nearby, send an encrypted message, wait for a reply, share
-files and keep a shared task board. Underneath, the
+together without a shared cloud service, two of them or a whole room. Each
+agent gets a small set of MCP tools: see who's nearby, send an encrypted
+message to one agent or to all of them, wait for a reply, share files and
+keep a task board the whole crew shares. Underneath, the
 [Offline Protocol SDK](https://github.com/Offline-Protocol/offline-protocol-sdk)
 carries everything with MLS end-to-end encryption, so nothing in between sees
 what the agents say to each other.
 
-In the demo, two Claude Code agents split a job, build a two-player Connect
-Four together, review each other's code, and then play the game against each
-other over the same link.
+In the demo, Claude Code agents split a job, build a two-player Connect Four
+together, review each other's code, and then play the game against each
+other over the same link. Two agents split it in two; three or more split it
+further and pick their opponents when they play.
 
 ## Features
 
 - **Peer discovery** over Bluetooth LE, the local network, or both.
-- **Encrypted messaging** on 1:1 MLS sessions the SDK sets up by itself.
-- **A shared task board** that both agents edit and that merges per task.
-- **File transfer** into the partner's workspace, at the same relative path.
-- **A radar page** that shows the link, every message and the board live.
+- **Any number of agents.** Every agent nearby joins one crew.
+- **Encrypted messaging** on 1:1 MLS sessions the SDK sets up by itself, to
+  one agent or to everyone.
+- **A shared task board** in an MLS group that every agent edits and that
+  merges per task.
+- **File transfer** into every other workspace, at the same relative path.
+- **A radar page** that shows a link to each agent, every message and the
+  board live.
 - **A game channel** so the finished game can be played across the link.
 - **Works with any MCP agent.** Claude Code is wired up out of the box.
 
@@ -47,10 +53,10 @@ This pulls `offline-protocol-sdk` from PyPI, which ships the
 
 ## Quick start
 
-### Two machines
+### Two or more machines
 
 On each machine, prepare a workspace and start a node. Use a different name
-on each side:
+on each:
 
 ```bash
 .venv/bin/offband init ~/ada --name Ada
@@ -64,11 +70,17 @@ the radar at <http://127.0.0.1:7777/>.
 Then start an agent in each workspace and give one of them the job:
 
 ```bash
-cd ~/ada && claude    # "Find the agent next to you and build a two-player game with it."
-cd ~/grace && claude  # "Work with the agent next to you. It will propose the plan."
+cd ~/ada && claude    # "Find the 2 agents next to you and build a two-player game with them."
+cd ~/grace && claude  # "Work with the agents next to you. The lead will propose the plan."
+cd ~/linus && claude  # the same as Grace
 ```
 
-The game the agents build is served at <http://127.0.0.1:7777/game/>.
+The lead plans for every agent it finds, so start the followers first, or
+tell the lead how many agents there are.
+
+The game the agents build is served at <http://127.0.0.1:7777/game/>. With
+more than two machines, the page asks whom to play, or open
+`/game/?vs=Grace`.
 
 ### Choosing a transport
 
@@ -81,9 +93,9 @@ offband up --name Ada --workspace ~/ada --transport ble
 # Local network, finding the other node over DNS-SD
 offband up --name Ada --workspace ~/ada --transport lan --lan-discovery
 
-# Local network with an explicit peer
+# Local network with explicit peers (repeat --peer once per machine)
 offband up --name Ada --workspace ~/ada --transport lan \
-  --listen 0.0.0.0:7911 --peer 192.168.1.20:7911
+  --listen 0.0.0.0:7911 --peer 192.168.1.20:7911 --peer 192.168.1.21:7911
 
 # Both
 offband up --name Ada --workspace ~/ada --transport both
@@ -91,16 +103,17 @@ offband up --name Ada --workspace ~/ada --transport both
 
 ### One machine
 
-To try it without a second machine, run two linked nodes over loopback:
+To try it on one machine, run linked nodes over loopback, one per name:
 
 ```bash
-.venv/bin/offband rehearse --root ./rehearsal
+.venv/bin/offband rehearse --root ./rehearsal                         # Ada and Grace
+.venv/bin/offband rehearse --root ./rehearsal --names Ada Grace Linus
 ```
 
-This prepares `rehearsal/ada` and `rehearsal/grace` and serves their radars on
-ports 7777 and 7778. Open an agent in each workspace as above.
-`scripts/headless_rehearsal.sh` runs the whole exchange with `claude -p` and
-logs both agents.
+This prepares a workspace per name under `rehearsal/` and serves their radars
+on ports 7777, 7778, 7779 and up. Open an agent in each workspace as above.
+`scripts/headless_rehearsal.sh ./rehearsal ada grace linus` runs the whole
+exchange with `claude -p`, the first name as the lead, and logs every agent.
 
 ## How it works
 
@@ -123,14 +136,21 @@ the other machine
 from the workspace's `.mcp.json`.
 
 - **Messages** are JSON envelopes inside ordinary 1:1 SDK messages, so they
-  ride the MLS session the SDK forms when the two nodes find each other.
-- **The board** is a replicated document in the 1:1 space the two agents
-  share. Each task is its own key, so edits to different tasks merge cleanly.
-- **Files** use the SDK's file transfer and land in the partner's workspace
-  at the same relative path. Each agent sends only the files it owns, so the
-  two trees converge.
-- **Game moves** are envelopes of kind `game`. They go to the game page and
-  never to the agent's inbox.
+  ride the MLS session the SDK forms when two nodes find each other. A
+  message to everyone is one such message per agent, so each agent reports
+  its own delivery and only the agents nearby can read it.
+- **The crew** is one MLS group of every agent nearby. The agent with the
+  lowest address creates it a moment after it hears another agent, and the
+  lowest-addressed member nearby invites anyone who turns up later. If two
+  crews ever form (two agents that each heard only part of the room), every
+  node picks the same one and copies what it wrote into it.
+- **The board** is a replicated document in the crew's group space. Each
+  task is its own key, so edits to different tasks merge cleanly.
+- **Files** use the SDK's file transfer and land in every other agent's
+  workspace at the same relative path. Each agent sends only the files it
+  owns, so the trees converge.
+- **Game moves** are envelopes of kind `game`, sent only to the opponent.
+  They go to the game page and never to the agent's inbox.
 - **Discovery** also registers an `offband-agent` mesh service. Service
   fields are signed but not encrypted, so it carries the agent's name and
   nothing else.
@@ -140,14 +160,14 @@ from the workspace's `.mcp.json`.
 | Tool | What it does |
 |---|---|
 | `announce(capabilities?)` | Advertises this agent nearby. |
-| `peers(wait_seconds?)` | Lists nearby agents with transport, signal and session state. Can wait until one is ready. |
-| `send(kind, body, peer?)` | Sends one encrypted message and reports delivery, transport and latency. |
-| `inbox(wait_seconds?)` | Returns new messages once each. Blocks until one arrives, and flags board changes. |
-| `board_get(peer?)` | Reads the shared board. |
-| `board_update(tasks?, notes?, remove?, peer?)` | Merges task patches by id and sets notes. |
-| `send_file(path, peer?)` | Sends one file of up to 256 KiB. |
+| `peers(wait_seconds?, min_agents?)` | Lists nearby agents with transport, signal and session state, and the crew. Can wait until enough are ready. |
+| `send(kind, body, peer?)` | Sends one encrypted message to everyone, or to the peer named, and reports delivery, transport and latency. |
+| `inbox(wait_seconds?)` | Returns new messages once each, marked `everyone` or `you`. Blocks until one arrives, and flags board changes. |
+| `board_get()` | Reads the crew's board. |
+| `board_update(tasks?, notes?, remove?)` | Merges task patches by id and sets notes. |
+| `send_file(path, peer?)` | Sends one file of up to 256 KiB to everyone, or to the peer named. |
 
-Both agents follow the protocol in
+Every agent follows the protocol in
 [`offband/agent/OFFBAND.md`](offband/agent/OFFBAND.md). It fixes the roles,
 the message kinds, the board conventions and the Connect Four contract.
 
@@ -166,7 +186,7 @@ offband/
 examples/
   reference-game/  a reference Connect Four built to the protocol's contract
 scripts/           headless rehearsal and a two-node spike
-tests/             end-to-end test with two real SDK services
+tests/             end-to-end tests with two and three real SDK services
 ```
 
 ## Development
@@ -175,16 +195,18 @@ tests/             end-to-end test with two real SDK services
 .venv/bin/python -m pytest
 ```
 
-The test starts two real SDK services on this machine, links them over
-loopback, and drives discovery, messages, the board, a file and game moves
-through two Offband nodes.
+The tests start real SDK services on this machine, link them over loopback,
+and drive discovery, messages, the board, a file and game moves through two
+Offband nodes, then through three, the third joining after the board exists.
 
 ## Known issues
 
 - If both nodes dial each other at the same moment over LAN, the SDK can lose
   the first key exchange and the session never comes up. `offband rehearse`
-  avoids this by having only one node dial. With `--peer`, give it on one
-  side only.
+  avoids this by having only one side of each pair dial. With `--peer`, give
+  each pair on one side only.
+- Crews of three and four have been run over loopback only. A room of Macs
+  over Bluetooth has not been tried yet.
 
 ## Security
 
