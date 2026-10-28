@@ -37,6 +37,8 @@ def _add_up_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--peer", action="append", default=[], help="lan: HOST:PORT of the other node (repeatable)")
     p.add_argument("--lan-discovery", action="store_true", help="lan: find the other node over DNS-SD")
     p.add_argument("--game-dir", help="serve the game from here instead of <workspace>/game")
+    p.add_argument("--allow", action="append", default=[], metavar="ADDRESS",
+                   help="only talk to this peer address (off1...); repeat once per peer. Default: anyone nearby")
     p.add_argument("--log-level", default="INFO")
 
 
@@ -54,7 +56,8 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
     log = logging.getLogger("offband")
     log.info("SDK service starting (%s), log: %s", args.transport, home / "service.log")
     try:
-        node = Node(LocalApi(str(spec.socket_path), APP_ID, f"offband/{__version__}"), args.name, workspace)
+        node = Node(LocalApi(str(spec.socket_path), APP_ID, f"offband/{__version__}"), args.name, workspace,
+                    allow=args.allow or None)
         start = asyncio.create_task(node.start())
         exited = asyncio.create_task(asyncio.to_thread(proc.wait))
         done, _ = await asyncio.wait({start, exited}, return_when=asyncio.FIRST_COMPLETED)
@@ -84,6 +87,13 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
                 proc.kill()
 
 
+def _check_allow(addresses: list[str]) -> str | None:
+    for address in addresses:
+        if not address.startswith("off1") or len(address) < 20:
+            return f"--allow takes a full peer address (off1...), not {address!r}"
+    return None
+
+
 def _main_async(coro_factory) -> int:
     async def runner() -> int:
         stop = asyncio.Event()
@@ -96,6 +106,10 @@ def _main_async(coro_factory) -> int:
 
 
 def cmd_up(args: argparse.Namespace) -> int:
+    problem = _check_allow(args.allow)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 2
     return _main_async(lambda stop: _run_node(args, stop))
 
 
@@ -118,7 +132,7 @@ def cmd_rehearse(args: argparse.Namespace) -> int:
                 # dialling the earlier ones: two nodes dialling each other at
                 # once can lose the first key exchange (README, Known issues).
                 transport="lan", listen=links[i], peer=links[:i], lan_discovery=False, game_dir=None,
-                log_level=args.log_level,
+                allow=[], log_level=args.log_level,
             )
             init_workspace(Path(ns.workspace), name, ports[i], quiet=True)
             runs.append(asyncio.create_task(_run_node(ns, stop)))

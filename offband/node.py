@@ -26,7 +26,7 @@ Everything that arrives from a peer is untrusted: a peer may run any code
 on top of the SDK. Envelopes are validated, inbound files are capped, files
 that would land on the agent's own instructions or settings are
 quarantined, and a name a peer claims never replaces the one already known
-for its address.
+for its address. ``allow`` restricts the node to a fixed set of addresses.
 """
 
 from __future__ import annotations
@@ -181,6 +181,7 @@ class Node:
         name: str,
         workspace: Path | None = None,
         files_dir: Path | None = None,
+        allow: list[str] | None = None,
     ) -> None:
         self.api = api
         self.name = name
@@ -188,6 +189,8 @@ class Node:
         # The quarantine for files a peer may not write into the workspace,
         # and the only destination when the node has no workspace.
         self.files_dir = (files_dir or (self.workspace / ".offband" / "received" if self.workspace else None))
+        # With an allowlist, every event from any other address is dropped.
+        self.allow: frozenset[str] | None = frozenset(allow) if allow else None
         self.address: str | None = None
         self.peers: dict[str, Peer] = {}
         self.log: list[Entry] = []
@@ -230,8 +233,12 @@ class Node:
             if not isinstance(node, dict):
                 continue
             address = node.get("id") or node.get("peer_id") or node.get("address")
-            if isinstance(address, str) and address.startswith("off1") and address != self.address:
+            if (isinstance(address, str) and address.startswith("off1") and address != self.address
+                    and self.admitted(address)):
                 self._touch_peer(address, None)
+
+    def admitted(self, address: str) -> bool:
+        return self.allow is None or address in self.allow
 
     async def announce(self, capabilities: dict[str, Any]) -> dict[str, Any]:
         """Registers this agent as a mesh service, for discovery only. The
@@ -655,6 +662,8 @@ class Node:
             if not info or info.get("name") != CREW_NAME or self.address not in (info.get("members") or []):
                 continue
             members = list(info.get("members") or [])
+            if not all(m == self.address or self.admitted(m) for m in members):
+                continue  # made or joined by a peer outside the allowlist
             key = (-len(members), gid, members)
             if best is None or key[:2] < best[:2]:
                 best = key
@@ -908,6 +917,10 @@ class Node:
         # The rpc dispatcher runs this off the socket reader, so handlers may
         # call the API; they still run one at a time, in the service's order.
         kind = event.get("type")
+        source = next((event[k] for k in ("sender", "peer_id", "provider_peer_id") if isinstance(event.get(k), str)),
+                      None)
+        if source and source != self.address and not self.admitted(source):
+            return  # a peer outside the allowlist: not even on the radar
         handler = getattr(self, f"_ev_{kind}", None)
         if handler is not None:
             await handler(event)

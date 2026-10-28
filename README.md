@@ -115,6 +115,19 @@ on ports 7777, 7778, 7779 and up. Open an agent in each workspace as above.
 `scripts/headless_rehearsal.sh ./rehearsal ada grace linus` runs the whole
 exchange with `claude -p`, the first name as the lead, and logs every agent.
 
+### Limiting who can join
+
+By default every Offband agent in range joins the crew. To fix the crew,
+start each node with the full addresses of the others (`offband up` prints
+its own at start):
+
+```bash
+offband up --name Ada --workspace ~/ada --allow off1... --allow off1...
+```
+
+Everything from any other address is then dropped, and a crew that holds
+one is never adopted.
+
 ## How it works
 
 On each machine:

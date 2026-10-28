@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fakes import ADA
 from offband import cli
 
 
@@ -13,3 +14,9 @@ def test_init_keeps_the_rest_of_claude_md(tmp_path):
     text = md.read_text()
     assert text.startswith("# Mine\n\nKeep this.\n")
     assert text.count(cli.MARK_START) == 1 and "7778" in text and "7777/" not in text
+
+
+def test_allow_needs_full_addresses():
+    assert cli._check_allow([ADA]) is None
+    assert cli._check_allow(["off1"]) is not None
+    assert cli._check_allow(["Ada"]) is not None

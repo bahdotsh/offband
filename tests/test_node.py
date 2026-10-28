@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from fakes import ADA, BOB, EVE, envelope, last, receive, receive_file
-from offband.node import MAX_FILE_BYTES, MAX_INBOUND_CHARS, NodeError, _stamp
+from fakes import ADA, BOB, EVE, ME, FakeApi, envelope, last, receive, receive_file
+from offband.node import MAX_FILE_BYTES, MAX_INBOUND_CHARS, Node, NodeError, _stamp
 
 
 # ---------------------------------------------------------------- envelopes
@@ -97,6 +97,22 @@ async def test_an_oversized_file_is_refused_and_not_written(node):
     body = last(node).body
     assert body["note"].startswith("refused") and body["saved_to"] is None
     assert not (node.workspace / "big.bin").exists()
+
+
+# --------------------------------------------------------------- allowlist
+
+async def test_the_allowlist_drops_everyone_else(tmp_path):
+    n = Node(FakeApi(), "Me", tmp_path, allow=[ADA])  # type: ignore[arg-type]
+    n.address = ME
+    await receive(n, EVE, envelope("chat", "let me in", name="Eve"))
+    await n._on_event({"type": "neighbor_discovered", "peer_id": EVE, "transport": "ble"})
+    await n._on_event({"type": "service_discovered", "service_id": "offband-agent", "provider_peer_id": EVE,
+                       "capabilities": {"name": "Eve"}})
+    assert EVE not in n.peers and not n.log
+    await receive(n, ADA, envelope("chat", "hi"))
+    assert n.peers[ADA].name == "Ada"
+    for task in list(n._tasks):
+        task.cancel()
 
 
 # -------------------------------------------------------------------- crew
