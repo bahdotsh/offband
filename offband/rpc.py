@@ -24,11 +24,18 @@ logger = logging.getLogger(__name__)
 
 EventHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
 
-# The service's own inbound frame limit (offline_protocol_sdk.local_api
-# MAX_MESSAGE_SIZE): its 100 MiB file limit as base64, plus 1 MiB. Our limit
-# must be at least as large, or one large file from any peer closes this
-# connection. Offband enforces its own, much smaller, file limit in code.
-MAX_FRAME = 100 * 1024 * 1024 * 4 // 3 + 1024 * 1024
+# The service's own inbound frame limit: its 100 MiB file limit as base64,
+# plus 1 MiB. Our limit must be at least as large, or one large file from
+# any peer closes this connection. Offband enforces its own, much smaller,
+# file limit in code (see ``max_file_chars``).
+try:
+    from offline_protocol_sdk.local_api import MAX_MESSAGE_SIZE as MAX_FRAME
+except ImportError:  # the tests run without the SDK
+    MAX_FRAME = 100 * 1024 * 1024 * 4 // 3 + 1024 * 1024
+
+# Frames larger than this are parsed off the event loop, so one big file
+# does not freeze the daemon while it is decoded.
+PARSE_IN_THREAD = 1024 * 1024
 
 
 class RpcError(Exception):
@@ -53,6 +60,11 @@ class LocalApi:
         self._reader: asyncio.Task[None] | None = None
         self._dispatcher: asyncio.Task[None] | None = None
         self._events: asyncio.Queue[dict[str, Any] | None] | None = None
+        # When set, a file_received event whose base64 data is longer than
+        # this is queued without the data, with its length in
+        # ``file_data_chars``: the handler refuses it by size, and the queue
+        # never holds a payload that will be thrown away.
+        self.max_file_chars: int | None = None
         self.closed = asyncio.Event()
 
     async def connect(self, timeout: float = 60.0) -> dict[str, Any]:
@@ -80,10 +92,14 @@ class LocalApi:
         try:
             async for raw in self._ws:
                 try:
-                    message = json.loads(raw)
+                    if len(raw) > PARSE_IN_THREAD:
+                        message = await asyncio.to_thread(json.loads, raw)
+                    else:
+                        message = json.loads(raw)
                 except ValueError:
                     logger.warning("dropped a frame that is not JSON")
                     continue
+                del raw
                 if not isinstance(message, dict):
                     continue
                 if "id" in message:
@@ -91,7 +107,7 @@ class LocalApi:
                     if waiter is not None and not waiter.done():
                         waiter.set_result(message)
                 elif message.get("method") == "event" and isinstance(message.get("params"), dict):
-                    events.put_nowait(message["params"])
+                    events.put_nowait(self._shed(message["params"]))
         except Exception as exc:
             reason = f"connection closed: {exc}"
         finally:
@@ -101,6 +117,16 @@ class LocalApi:
             self._pending.clear()
             events.put_nowait(None)
             self.closed.set()
+
+    def _shed(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Drops a file payload over ``max_file_chars`` before it is queued.
+        The reader must never block (it also routes responses), so the queue
+        is unbounded; shedding here keeps it from holding large files."""
+        data = event.get("file_data")
+        if (self.max_file_chars is not None and event.get("type") == "file_received"
+                and isinstance(data, str) and len(data) > self.max_file_chars):
+            event = {**event, "file_data": None, "file_data_chars": len(data)}
+        return event
 
     async def _dispatch(self, events: asyncio.Queue[dict[str, Any] | None]) -> None:
         while True:

@@ -146,3 +146,15 @@ async def test_a_symlink_out_of_the_workspace_is_not_followed(node, tmp_path):
     await receive_file(node, ADA, "out%2Fx.txt", b"x")
     assert last(node).body["saved_to"] is None
     assert not (outside / "x.txt").exists()
+
+
+async def test_a_file_of_exactly_the_limit_is_accepted(node):
+    await receive_file(node, ADA, "max.bin", b"\0" * MAX_FILE_BYTES)
+    assert (node.workspace / "max.bin").stat().st_size == MAX_FILE_BYTES
+
+
+async def test_a_file_shed_by_the_reader_is_refused_by_its_length(node):
+    await node._on_event({"type": "file_received", "sender": ADA, "file_name": "big.bin", "file_data": None,
+                          "file_data_chars": 10 * 1024 * 1024, "file_id": "f-shed"})
+    body = last(node).body
+    assert body["note"].startswith("refused") and body["bytes"] == 10 * 1024 * 1024 * 3 // 4

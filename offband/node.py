@@ -66,6 +66,7 @@ INBOUND_KINDS = AGENT_KINDS + ("hello", "game")
 # files of tens of KiB are the intended size. The same limit applies to
 # files that arrive: anything larger is refused, not written.
 MAX_FILE_BYTES = 256 * 1024
+MAX_FILE_CHARS = (MAX_FILE_BYTES + 2) // 3 * 4  # the same limit, as base64
 MAX_BODY_CHARS = 16 * 1024
 MAX_INBOUND_CHARS = 4 * MAX_BODY_CHARS  # the whole envelope, as received
 MAX_NAME_CHARS = 40
@@ -216,6 +217,8 @@ class Node:
 
     async def start(self) -> None:
         self.api.on_event = self._on_event
+        # Larger files are refused anyway: let the reader drop their bytes.
+        self.api.max_file_chars = MAX_FILE_CHARS
         hello = await self.api.connect()
         self.address = hello.get("local_address")
         await self.api.call("subscribe", {"types": "all"})
@@ -1098,9 +1101,13 @@ class Node:
         encoded = encoded if isinstance(encoded, str) else ""
         name = event.get("file_name")
         name = name if isinstance(name, str) and name else "file"
-        size = len(encoded) * 3 // 4
+        # The rpc reader drops the bytes of a file over the limit and keeps
+        # only their length.
+        shed = event.get("file_data_chars")
+        chars = shed if isinstance(shed, int) else len(encoded)
+        size = chars * 3 // 4
         saved: Path | None = None
-        if size > MAX_FILE_BYTES:
+        if chars > MAX_FILE_CHARS:
             # Refused before decoding: the limit the sender should have kept.
             relative = "/".join(self._clean_relative(name))
             note = f"refused: over the {MAX_FILE_BYTES}-byte limit, not saved"
