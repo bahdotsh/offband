@@ -503,3 +503,16 @@ async def test_a_file_event_without_data_is_logged(node, caplog):
     await node._on_event({"type": "file_received", "sender": ADA, "file_name": "a.txt", "file_data": None,
                           "file_id": "f-none"})
     assert not node.log and "without data" in caplog.text
+
+
+async def test_an_edit_is_stamped_after_the_version_it_came_from(tmp_path):
+    future = 4_000_000_000.0  # a peer whose clock runs ahead
+    api = BoardApi({"tasks": {"t": json.dumps({"title": "x", "updated_at": future})}})
+    n = Node(api, "Me", tmp_path)  # type: ignore[arg-type]
+    n.address = ME
+    await n.board_update(tasks=[{"id": "t", "status": "doing"}])
+    written = [c[1] for c in api.calls if c[0] == "data.map_set" and c[1]["key"] == "t"]
+    stored = json.loads(json.loads(written[-1]["value_json"])["value"])
+    assert stored["updated_at"] > future
+    for task in list(n._tasks):
+        task.cancel()

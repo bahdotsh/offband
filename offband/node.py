@@ -907,7 +907,9 @@ class Node:
             merged = {**current.get(task_id, {}), **patch}
             merged.pop("id", None)
             merged["updated_by"] = self.name
-            merged["updated_at"] = round(time.time(), 3)  # lets a crew merge keep the newer edit
+            # Lets a crew merge keep the newer edit. Laptop clocks differ, so
+            # an edit is always stamped after the version it was made from.
+            merged["updated_at"] = round(max(time.time(), _stamp(current.get(task_id)) + 0.001), 3)
             await self.api.call(
                 "data.map_set",
                 {**space, "collection": "tasks", "key": task_id,
