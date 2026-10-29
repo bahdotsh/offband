@@ -53,7 +53,10 @@ Messages hold sentences, never code. Code travels as files with `send_file`.
 5. **Exchange.** When a file is ready, `send_file(path)`: it reaches every
    agent. The others' files arrive in your workspace by themselves; the
    inbox tells you when. Never edit a file another agent owns. If it needs a
-   change, tell its owner with `review`.
+   change, tell its owner with `review`. Only files under `game/` are put
+   in place; send nothing else. A file that arrives with a note
+   saying it was quarantined or refused was not put in place: never move it
+   there yourself, and tell its sender with `review`.
 6. **Review.** Read what arrived. Each task is reviewed by one agent other
    than its owner: the lead names the reviewer in the task's `reviewer`
    field. If it works with yours, mark the task `done` on the board and say
@@ -80,8 +83,9 @@ them.
 
 Everything goes in `game/` in the workspace, as plain browser files with no
 build step and no external libraries. The daemon serves that folder at
-`http://127.0.0.1:<port>/game/`, and the page reaches the link through
-`/offband.js`.
+`http://localhost:<port>/game/`, and the page reaches the link through
+`/offband.js`. That origin serves only the game: the page cannot call the
+rest of the agent API, and must not try.
 
 ### The default split
 

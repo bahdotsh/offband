@@ -13,7 +13,7 @@ dependencies = [
     "mcp>=2.3,<3",
     "starlette>=0.40",
     "uvicorn>=0.30",
-    "websockets>=12,<17",
+    "websockets>=13,<17",
 ]
 
 [project.optional-dependencies]
@@ -26,8 +26,9 @@ offband = "offband.cli:main"
 include = ["offband*"]
 
 [tool.setuptools.package-data]
-offband = ["web/*", "web/**/*", "agent/*", "game_kit/*"]
+offband = ["web/*", "web/**/*", "agent/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]

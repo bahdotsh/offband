@@ -4,9 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Offband radar</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+/* Bundled with the daemon: the radar runs with no internet. */
+@font-face { font-family: "Familjen Grotesk"; src: url("/fonts/FamiljenGrotesk.woff2") format("woff2");
+  font-weight: 400 700; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("/fonts/JetBrainsMono.woff2") format("woff2");
+  font-weight: 400 500; font-display: swap; }
 :root {
   --chart: #e6ecef;
   --chart-deep: #d5dee3;
@@ -408,18 +411,21 @@ function renderBoard(board) {
     col.className = "col";
     col.dataset.status = status;
     col.innerHTML = `<h3>${label}</h3>`;
-    const tasks = (board.tasks || []).filter((t) => (t.status || "todo") === status);
+    // Every crew member writes the board: never trust a field's type.
+    const text = (v) => (typeof v === "string" ? v : v == null ? "" : String(v));
+    const tasks = (Array.isArray(board.tasks) ? board.tasks : [])
+      .filter((t) => t && typeof t === "object" && (text(t.status) || "todo") === status);
     for (const t of tasks) {
       const card = document.createElement("div");
-      const owner = t.owner || "";
+      const owner = text(t.owner);
       const mine = owner && me.name && owner.toLowerCase() === me.name.toLowerCase();
       card.className = "task " + (owner ? (mine ? "me" : "peer") : "");
       const c = !mine && colorByName(owner);
       if (c) card.style.setProperty("--c", c);
       card.innerHTML = `<div class="t"></div><div class="o"></div><div class="f"></div>`;
-      card.querySelector(".t").textContent = t.title || t.id;
+      card.querySelector(".t").textContent = text(t.title) || text(t.id);
       card.querySelector(".o").textContent = owner ? owner : "unassigned";
-      const files = Array.isArray(t.files) ? t.files.join(", ") : (t.files || "");
+      const files = Array.isArray(t.files) ? t.files.map(text).join(", ") : text(t.files);
       card.querySelector(".f").textContent = files;
       const key = JSON.stringify(t);
       if (lastBoard.size && lastBoard.get(t.id) !== key) card.classList.add("flash");
@@ -437,8 +443,8 @@ function renderBoard(board) {
 async function loadBoard() {
   if (!shown.length) return;
   try {
-    const r = await fetch("/api/board");
-    if (r.ok) renderBoard(await r.json());
+    const r = await fetch("/api/board", { headers: { "X-Offband": "1" } });
+    if (r.ok) renderBoard(await r.json());  // a throw lands in the catch below
   } catch (_) { /* the stream will bring it */ }
 }
 
@@ -476,7 +482,9 @@ function connect() {
       case "link": link = ev.transport; renderNodes(); break;
       case "msg": launch(ev.msg); updateLog(ev.msg); subtitle(ev.msg); break;
       case "status": settle(ev.msg); break;
-      case "board": renderBoard(ev.board); break;
+      case "board":
+        try { renderBoard(ev.board); } catch (err) { console.error("board not shown", err); }
+        break;
     }
   };
 }

@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import shutil
 import signal
 import subprocess
@@ -37,6 +38,10 @@ def _add_up_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--peer", action="append", default=[], help="lan: HOST:PORT of the other node (repeatable)")
     p.add_argument("--lan-discovery", action="store_true", help="lan: find the other node over DNS-SD")
     p.add_argument("--game-dir", help="serve the game from here instead of <workspace>/game")
+    p.add_argument("--allow", action="append", default=[], metavar="ADDRESS",
+                   help="only talk to this peer address (off1...); repeat once per peer. Default: anyone nearby")
+    p.add_argument("--fresh", action="store_true",
+                   help="start with a new identity, no crew and no board: deletes the node home first")
     p.add_argument("--log-level", default="INFO")
 
 
@@ -45,7 +50,7 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
     from .node import Node
     from .rpc import LocalApi
 
-    home = Path(args.home).expanduser() if args.home else default_home(args.name.lower())
+    home = node_home(args)
     spec = ServiceSpec(home=home, transport=args.transport, listen=args.listen, peers=args.peer,
                        lan_discovery=args.lan_discovery, log_level=args.log_level)
     workspace = Path(args.workspace).expanduser().resolve()
@@ -54,7 +59,8 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
     log = logging.getLogger("offband")
     log.info("SDK service starting (%s), log: %s", args.transport, home / "service.log")
     try:
-        node = Node(LocalApi(str(spec.socket_path), APP_ID, f"offband/{__version__}"), args.name, workspace)
+        node = Node(LocalApi(str(spec.socket_path), APP_ID, f"offband/{__version__}"), args.name, workspace,
+                    allow=args.allow or None)
         start = asyncio.create_task(node.start())
         exited = asyncio.create_task(asyncio.to_thread(proc.wait))
         done, _ = await asyncio.wait({start, exited}, return_when=asyncio.FIRST_COMPLETED)
@@ -63,7 +69,7 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
             return 1
         start.result()
         log.info("%s is %s", args.name, node.address)
-        log.info("radar: http://127.0.0.1:%d/   game: http://127.0.0.1:%d/game/", args.port, args.port)
+        log.info("radar: http://127.0.0.1:%d/   game: http://localhost:%d/game/", args.port, args.port)
         game_dir = Path(args.game_dir).resolve() if args.game_dir else None
         web = asyncio.create_task(serve(node, args.port, game_dir))
         lost = asyncio.create_task(node.api.closed.wait())
@@ -84,6 +90,55 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
                 proc.kill()
 
 
+class HomeError(Exception):
+    """A node home --fresh will not delete."""
+
+
+def node_home(args: argparse.Namespace) -> Path:
+    return Path(args.home).expanduser() if args.home else default_home(args.name.lower())
+
+
+def _reset_homes(homes: list[Path]) -> bool:
+    """Runs --fresh before any service starts, so a refusal stops the
+    command cleanly instead of escaping from inside a running node."""
+    try:
+        for home in homes:
+            reset_home(home)
+    except HomeError as exc:
+        print(f"--fresh: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
+def reset_home(home: Path) -> None:
+    """Deletes a node home, so the node starts with a new identity and none
+    of the last run's crew or board. Refuses a directory that does not look
+    like a node home, so a mistyped --home never deletes anything else."""
+    if home.is_symlink():
+        # rmtree refuses a link, and following it would delete its target.
+        raise HomeError(f"{home} is a symbolic link; give the real directory with --home")
+    if not home.exists():
+        return
+    markers = ("config.json", "store.key", "keys", "state")
+    if not home.is_dir() or not any((home / m).exists() for m in markers):
+        raise HomeError(f"{home} is not an Offband node home; not deleting it")
+    # Finder drops .DS_Store into any folder it shows; it is not user data.
+    tolerated = markers + ("service.log", "service.log.1", ".DS_Store")
+    unexpected = [p.name for p in home.iterdir() if p.name not in tolerated]
+    if unexpected:
+        raise HomeError(f"{home} holds files Offband did not make ({', '.join(unexpected)}); not deleting it")
+    shutil.rmtree(home)
+
+
+def _check_allow(addresses: list[str]) -> str | None:
+    for address in addresses:
+        # A comma- or space-joined list, a pasted "off1..." or a cut-off
+        # address would never match a peer, so the node would hear no one.
+        if not re.fullmatch(r"off1[0-9a-z]{16,}", address):
+            return f"--allow takes one full peer address (off1...) per flag, not {address!r}"
+    return None
+
+
 def _main_async(coro_factory) -> int:
     async def runner() -> int:
         stop = asyncio.Event()
@@ -96,6 +151,12 @@ def _main_async(coro_factory) -> int:
 
 
 def cmd_up(args: argparse.Namespace) -> int:
+    problem = _check_allow(args.allow)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 2
+    if args.fresh and not _reset_homes([node_home(args)]):
+        return 2
     return _main_async(lambda stop: _run_node(args, stop))
 
 
@@ -108,17 +169,20 @@ def cmd_rehearse(args: argparse.Namespace) -> int:
         return 2
     ports = [args.port + i for i in range(len(names))]
     links = [f"127.0.0.1:{args.link_port + i}" for i in range(len(names))]
+    homes = [root / f".{name.lower()}-node" for name in names]
+    if args.fresh and not _reset_homes(homes):
+        return 2
 
     async def run_all(stop: asyncio.Event) -> int:
         runs = []
         for i, name in enumerate(names):
             ns = argparse.Namespace(
-                name=name, workspace=str(root / name.lower()), port=ports[i], home=str(root / f".{name.lower()}-node"),
+                name=name, workspace=str(root / name.lower()), port=ports[i], home=str(homes[i]),
                 # Each pair is dialled from one side only, the later node
                 # dialling the earlier ones: two nodes dialling each other at
                 # once can lose the first key exchange (README, Known issues).
                 transport="lan", listen=links[i], peer=links[:i], lan_discovery=False, game_dir=None,
-                log_level=args.log_level,
+                allow=[], log_level=args.log_level,
             )
             init_workspace(Path(ns.workspace), name, ports[i], quiet=True)
             runs.append(asyncio.create_task(_run_node(ns, stop)))
@@ -150,7 +214,7 @@ def init_workspace(workspace: Path, name: str, port: int, quiet: bool = False) -
         f"{MARK_START}\n"
         f"You are {name}, an Offband agent. Read OFFBAND.md and follow it.\n\n"
         f"- Your radar: http://127.0.0.1:{port}/\n"
-        f"- The game, once built: http://127.0.0.1:{port}/game/\n"
+        f"- The game, once built: http://localhost:{port}/game/\n"
         f"{MARK_END}\n"
     )
     text = claude_md.read_text() if claude_md.exists() else ""
@@ -209,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     rehearse.add_argument("--names", nargs="+", default=["Ada", "Grace"], help="one node per name (two or more)")
     rehearse.add_argument("--port", type=int, default=7777, help="radar port of the first node; the rest count up")
     rehearse.add_argument("--link-port", type=int, default=7911, help="loopback link port of the first node")
+    rehearse.add_argument("--fresh", action="store_true",
+                          help="start every node with a new identity, no crew and no board")
     rehearse.add_argument("--log-level", default="INFO")
     rehearse.set_defaults(fn=cmd_rehearse)
 

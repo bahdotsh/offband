@@ -78,7 +78,7 @@ cd ~/linus && claude  # the same as Grace
 The lead plans for every agent it finds, so start the followers first, or
 tell the lead how many agents there are.
 
-The game the agents build is served at <http://127.0.0.1:7777/game/>. With
+The game the agents build is served at <http://localhost:7777/game/>. With
 more than two machines, the page asks whom to play, or open
 `/game/?vs=Grace`.
 
@@ -115,6 +115,35 @@ on ports 7777, 7778, 7779 and up. Open an agent in each workspace as above.
 `scripts/headless_rehearsal.sh ./rehearsal ada grace linus` runs the whole
 exchange with `claude -p`, the first name as the lead, and logs every agent.
 
+### Starting clean
+
+A node keeps its identity, its crew and the board in its home
+(`~/.offband/<name>`, or `rehearsal/.<name>-node`), so a second run picks up
+where the first stopped. Pass `--fresh` to `up` or `rehearse` to start with
+a new identity and an empty board. It deletes only a directory that holds
+nothing but a node's own files.
+
+### Limiting who can join
+
+By default every Offband agent in range joins the crew. To fix the crew,
+start each node with the full addresses of the others (`offband up` prints
+its own at start):
+
+```bash
+offband up --name Ada --workspace ~/ada --allow off1... --allow off1...
+```
+
+Everything from any other address is then dropped, the node will not send
+to one, and a crew that holds one is never adopted. If another member
+invites an outsider into the crew later, this node leaves that MLS group
+and stops writing the board there, and it leaves again each time it is
+invited back while the outsider is in it.
+
+`--allow` holds for one node, not for the room. It gives a clean crew only
+when every node in the room runs with the same addresses. A node that
+allows only some peers, in a room where the others allow anyone, leaves the
+crew the others share and ends up with a board of its own.
+
 ## How it works
 
 On each machine:
@@ -148,7 +177,8 @@ from the workspace's `.mcp.json`.
   task is its own key, so edits to different tasks merge cleanly.
 - **Files** use the SDK's file transfer and land in every other agent's
   workspace at the same relative path. Each agent sends only the files it
-  owns, so the trees converge.
+  owns, so the trees converge. Only files under `game/` are put in place;
+  any other path is quarantined instead (see Security).
 - **Game moves** are envelopes of kind `game`, sent only to the opponent.
   They go to the game page and never to the agent's inbox.
 - **Discovery** also registers an `offband-agent` mesh service. Service
@@ -162,7 +192,7 @@ from the workspace's `.mcp.json`.
 | `announce(capabilities?)` | Advertises this agent nearby. |
 | `peers(wait_seconds?, min_agents?)` | Lists nearby agents with transport, signal and session state, and the crew. Can wait until enough are ready. |
 | `send(kind, body, peer?)` | Sends one encrypted message to everyone, or to the peer named, and reports delivery, transport and latency. |
-| `inbox(wait_seconds?)` | Returns new messages once each, marked `everyone` or `you`. Blocks until one arrives, and flags board changes. |
+| `inbox(wait_seconds?)` | Returns new messages once each, with the sender's name and address, marked `everyone` or `you`. Blocks until one arrives, and flags board changes. |
 | `board_get()` | Reads the crew's board. |
 | `board_update(tasks?, notes?, remove?)` | Merges task patches by id and sets notes. |
 | `send_file(path, peer?)` | Sends one file of up to 256 KiB to everyone, or to the peer named. |
@@ -210,16 +240,54 @@ Offband nodes, then through three, the third joining after the board exists.
 
 ## Security
 
-- The daemon binds 127.0.0.1 only. Every POST needs the header
-  `X-Offband: 1` and every request a loopback Host header. Together they stop
-  a web page in the same browser from driving the agent, by cross-site
-  request or by DNS rebinding.
-- Any local process of the same user can still reach the daemon and the SDK
-  socket. That is the SDK's own trust boundary for the local API.
-- Messages and files are MLS-encrypted end to end. The `offband-agent`
+Offband assumes a room of people who trust each other's agents. Within
+that, it keeps a stray device or a hostile peer from doing much harm:
+
+- **Anyone in range can join by default.** A device that runs the SDK and
+  announces itself as an agent is invited into the crew, reads the board
+  and receives every file. Use `--allow` to fix the crew to known
+  addresses.
+- **Names are claims.** The first name an address gives stands, a later
+  different one is ignored, and no peer may take this node's own name. Two
+  peers with one name are never guessed between: name the address. The
+  inbox gives every sender's address.
+- **Crew claims are claims too.** A peer that says it is in a crew stops
+  this node from making one by itself. A false claim only delays the crew:
+  the first `board_update` makes one after 20 seconds, and the claim lapses
+  when the peer leaves.
+- **What a peer sends is validated.** Unknown message kinds read as chat, a
+  peer cannot fake a file notice, messages over 64 KiB are not passed on,
+  files over 256 KiB or not valid base64 are refused and never written, and
+  a board task that is not an object reads as a bare title instead of
+  breaking the board.
+- **A peer writes only the game.** A received file goes into the workspace
+  at its relative path only under `game/`, and even there never on a path
+  with any part starting with `.` or named `CLAUDE.md`, `CLAUDE.local.md`,
+  `OFFBAND.md`, `AGENTS.md` or `GEMINI.md`. Everything else, including a
+  `Makefile`, `package.json` or `.claude/settings.json`, lands in
+  `.offband/received/<sender>/` and the inbox says so. There, every part
+  that made a path unsafe gets a `.quarantined` suffix, so a peer's
+  `CLAUDE.md` never sits where agent tools load it. Paths with `..` or
+  absolute paths are reduced to their file name. A crew member can still
+  rewrite the game, so open it only from peers whose code you would run.
+- **The agent sends only workspace files.** `send_file` refuses a path
+  outside the workspace, a dot path such as `.env`, and the agent's own
+  instruction files, so a prompt or page cannot make it ship `~/.ssh/`.
+- **The game runs on its own origin.** Peers write the game, so it is
+  served at `http://localhost:<port>/game/`, which offers only the game,
+  `/offband.js` and the game channel. The radar and the agent API are on
+  `http://127.0.0.1:<port>`, a different origin a game page cannot call.
+- **The daemon binds loopback only, 127.0.0.1 and ::1.** Every request needs a loopback Host
+  header, which stops DNS rebinding. Every `/api/` request also needs the
+  header `X-Offband: 1`, reads included, since reading the inbox consumes
+  it. A client of the API other than the MCP server must send it too. A cross-site page can only send that header after a CORS preflight
+  the daemon never answers. The two event streams are exempt because
+  `EventSource` cannot set headers; they only read, and a cross-site page
+  cannot read their responses.
+- **Any local process of the same user can still reach the daemon and the
+  SDK socket.** That is the SDK's own trust boundary for the local API.
+- **Messages and files are MLS-encrypted end to end.** The `offband-agent`
   service registration is signed plaintext, so it carries only the name.
-- A received file is written only inside the workspace. Paths with `..` or
-  absolute paths are reduced to their file name.
 
 ## Contributing
 
