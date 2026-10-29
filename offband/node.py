@@ -1161,26 +1161,31 @@ class Node:
             return
         peer = self._touch_peer(sender, None)
         encoded = event.get("file_data")
+        shed = event.get("file_data_chars")
+        if not isinstance(encoded, str) and not isinstance(shed, int):
+            return  # no payload at all: nothing to save, and no empty file
         encoded = encoded if isinstance(encoded, str) else ""
         name = event.get("file_name")
         name = name if isinstance(name, str) and name else "file"
         # The rpc reader drops the bytes of a file over the limit and keeps
         # only their length.
-        shed = event.get("file_data_chars")
         chars = shed if isinstance(shed, int) else len(encoded)
         size = chars * 3 // 4
         saved: Path | None = None
-        if chars > MAX_FILE_CHARS:
-            # Refused before decoding: the limit the sender should have kept.
-            relative = "/".join(self._clean_relative(name))
-            note = f"refused: over the {MAX_FILE_BYTES}-byte limit, not saved"
-            logger.warning("refused a %d-byte file from %s", size, short(sender))
-        else:
+        data: bytes | None = None
+        if chars <= MAX_FILE_CHARS:
             try:
                 data = base64.b64decode(encoded, validate=True)
             except (binascii.Error, ValueError):
                 data = b""
             size = len(data)
+        # The base64 check refuses most oversized files before decoding; the
+        # byte check catches the last two bytes base64 padding hides.
+        if data is None or size > MAX_FILE_BYTES:
+            relative = "/".join(self._clean_relative(name))
+            note = f"refused: over the {MAX_FILE_BYTES}-byte limit, not saved"
+            logger.warning("refused a %d-byte file from %s", size, short(sender))
+        else:
             try:
                 relative, saved, note = await asyncio.to_thread(self._store_received, sender, name, data)
             except (OSError, ValueError) as exc:  # ValueError: a NUL in the name

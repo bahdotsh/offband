@@ -298,3 +298,16 @@ async def test_a_failing_board_push_is_logged_not_raised(node, monkeypatch, capl
     monkeypatch.setattr(node, "board_get", boom)
     await node._push_board()
     assert "board not pushed" in caplog.text
+
+
+async def test_a_file_two_bytes_over_the_limit_is_refused(node):
+    await receive_file(node, ADA, "over.bin", b"\0" * (MAX_FILE_BYTES + 1))
+    body = last(node).body
+    assert body["note"].startswith("refused") and body["saved_to"] is None
+    assert not (node.workspace / "over.bin").exists()
+
+
+async def test_a_file_event_without_data_writes_nothing(node):
+    await node._on_event({"type": "file_received", "sender": ADA, "file_name": "a.txt", "file_data": 7,
+                          "file_id": "f-nodata"})
+    assert not node.log and not (node.workspace / "a.txt").exists()
