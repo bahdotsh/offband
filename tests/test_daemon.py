@@ -167,3 +167,22 @@ async def test_an_event_stream_skips_a_frame_that_is_not_strict_json():
     assert await frames.__anext__() == ""
     assert await frames.__anext__() == 'data: {"t": "ok"}\n\n'
     await frames.aclose()
+
+
+def test_the_daemon_listens_on_both_loopback_addresses():
+    import socket
+
+    from offband.daemon import loopback_sockets
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    sockets = loopback_sockets(port)
+    try:
+        assert sockets[0].getsockname()[:2] == ("127.0.0.1", port)
+        if socket.has_ipv6 and len(sockets) > 1:
+            assert sockets[1].getsockname()[:2] == ("::1", port)
+    finally:
+        for sock in sockets:
+            sock.close()

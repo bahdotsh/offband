@@ -8,7 +8,7 @@
     /api/stream       radar events, as server-sent events
     /api/game/stream  game moves from the peer, as server-sent events
 
-Loopback only. Every request needs a loopback Host header, which stops DNS
+Loopback only, on 127.0.0.1 and ::1. Every request needs a loopback Host header, which stops DNS
 rebinding. The game is written by peers, so it is served on its own origin,
 ``http://localhost:<port>``, which has only the game, ``/offband.js`` and
 the ``/api/game`` routes; ``/game/`` on 127.0.0.1 redirects there. The
@@ -28,6 +28,7 @@ import functools
 import json
 import logging
 import math
+import socket
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -313,6 +314,31 @@ def build_app(node: Node, game_dir: Path | None = None) -> Starlette:
     return Starlette(routes=routes, middleware=[Middleware(Guard)])
 
 
+def loopback_sockets(port: int) -> list[socket.socket]:
+    """Listening sockets on 127.0.0.1 and, where the host has it, ::1. The
+    game origin is ``localhost``, which macOS and many Linux hosts resolve
+    to ::1 first: without that socket every game load waits on a refused
+    connection before the browser falls back to 127.0.0.1."""
+    sockets = []
+    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            sock.bind((host, port))
+        except OSError as exc:
+            sock.close()
+            if family == socket.AF_INET:
+                for other in sockets:
+                    other.close()
+                raise
+            logger.info("not serving on [::1]:%d: %s", port, exc)
+            continue
+        sockets.append(sock)
+    return sockets
+
+
 async def serve(node: Node, port: int, game_dir: Path | None = None) -> None:
     import uvicorn
 
@@ -320,4 +346,4 @@ async def serve(node: Node, port: int, game_dir: Path | None = None) -> None:
         build_app(node, game_dir), host="127.0.0.1", port=port, log_level="warning", lifespan="off"
     )
     server = uvicorn.Server(config)
-    await server.serve()
+    await server.serve(sockets=loopback_sockets(port))

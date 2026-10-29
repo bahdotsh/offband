@@ -272,7 +272,7 @@ that, it keeps a stray device or a hostile peer from doing much harm:
   served at `http://localhost:<port>/game/`, which offers only the game,
   `/offband.js` and the game channel. The radar and the agent API are on
   `http://127.0.0.1:<port>`, a different origin a game page cannot call.
-- **The daemon binds 127.0.0.1 only.** Every request needs a loopback Host
+- **The daemon binds loopback only, 127.0.0.1 and ::1.** Every request needs a loopback Host
   header, which stops DNS rebinding. Every `/api/` request also needs the
   header `X-Offband: 1`, reads included, since reading the inbox consumes
   it. A client of the API other than the MCP server must send it too. A cross-site page can only send that header after a CORS preflight
