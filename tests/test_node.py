@@ -203,6 +203,8 @@ async def test_a_crew_that_takes_in_an_outsider_is_left(tmp_path):
     await n._load_crew()
     assert n.crew == "g1"
     api.members = [ME, ADA, EVE]
+    # The service reports the add; the outsider's address must not hide it.
+    await n._on_event({"type": "group_member_added", "group_id": "g1", "peer_id": EVE})
     assert await n._ensure_crew(create=False) is None
     assert n.crew is None and n.crew_members == []
     assert ("leave_group", {"group_id": "g1"}) in api.calls
@@ -479,5 +481,19 @@ async def test_an_outsider_added_to_the_crew_is_heard_of_under_allow(tmp_path):
     for _ in range(10):
         await asyncio.sleep(0)
     assert _leaves(api) == 1 and n.crew is None
+    for task in list(n._tasks):
+        task.cancel()
+
+
+async def test_an_allowlisted_crew_is_not_looked_up_on_every_read(tmp_path):
+    api = CrewApi([ME, ADA])
+    n = Node(api, "Me", tmp_path, allow=[ADA])  # type: ignore[arg-type]
+    n.address = ME
+    for _ in range(5):
+        await n._ensure_crew(create=False)
+    assert len([c for c in api.calls if c[0] == "list_groups"]) == 1
+    await n._on_event({"type": "group_member_removed", "group_id": "g1", "peer_id": ADA})
+    await n._ensure_crew(create=False)
+    assert len([c for c in api.calls if c[0] == "list_groups"]) >= 2
     for task in list(n._tasks):
         task.cancel()

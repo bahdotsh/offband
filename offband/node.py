@@ -78,6 +78,9 @@ CREW_WAIT = 20.0
 CREW_SETTLE = 2.5  # lets the room fill in before the creator picks it
 LOG_LIMIT = 2000
 SEEN_LIMIT = 4096
+# With --allow, how long a crew check stays good before the next use of the
+# crew asks the service again. Group events clear it at once.
+CREW_CHECK_TTL = 2.0
 
 
 
@@ -226,6 +229,7 @@ class Node:
         self.crew_members: list[str] = []
         self._crew_lock = asyncio.Lock()
         self._left_groups: set[str] = set()
+        self._crew_checked: float | None = None  # loop time of the last crew load
         self._name_conflicts: set[str] = set()  # addresses already warned about
 
     # ------------------------------------------------------------------ setup
@@ -671,6 +675,7 @@ class Node:
         # (it may, a while after the leave). Once it does not, or once the
         # crew is clean, the next outsider or re-invitation is left again.
         self._left_groups = (self._left_groups & (mine | unsure)) - (mine - refused)
+        self._crew_checked = asyncio.get_running_loop().time()
         for gid in refused - self._left_groups:
             # A crew that took in a peer outside the allowlist (another member
             # invited it): leave the MLS group, so this node neither writes
@@ -753,9 +758,11 @@ class Node:
         """The crew's group id. With ``create``, makes the crew when there
         is none (and raises NodeError when no agent is nearby to share it)."""
         async with self._crew_lock:
-            # With an allowlist, the crew is checked on every use: another
-            # member may have let an outsider in since it was adopted.
-            if self.crew is None or self.allow is not None:
+            # With an allowlist, the crew is checked again before use: another
+            # member may have let an outsider in since it was adopted. Group
+            # events force the check; otherwise it holds for CREW_CHECK_TTL,
+            # so a burst of board reads is not a burst of group lookups.
+            if self.crew is None or (self.allow is not None and self._crew_stale()):
                 await self._load_crew()
             if self.crew is None:
                 if not create:
@@ -769,6 +776,10 @@ class Node:
             if self._inviter():
                 await self._invite_missing()
             return self.crew
+
+    def _crew_stale(self) -> bool:
+        checked = self._crew_checked
+        return checked is None or asyncio.get_running_loop().time() - checked > CREW_CHECK_TTL
 
     async def _invite_missing(self) -> None:
         if self.crew is None:
@@ -1212,11 +1223,13 @@ class Node:
 
     async def _ev_group_member_added(self, event: dict[str, Any]) -> None:
         # An invitation to a crew, or a newcomer in ours.
+        self._crew_checked = None  # the next use of the crew checks it again
         group_id = event.get("group_id")
         if isinstance(group_id, str):
             self._spawn(self._join_crew(group_id))
 
     async def _ev_group_member_removed(self, event: dict[str, Any]) -> None:
+        self._crew_checked = None
         self._spawn(self._load_crew())
 
     async def _push_board(self) -> None:
