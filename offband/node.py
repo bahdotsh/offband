@@ -949,7 +949,10 @@ class Node:
         kind = event.get("type")
         source = next((event[k] for k in ("sender", "peer_id", "provider_peer_id") if isinstance(event.get(k), str)),
                       None)
-        if source and source != self.address and not self.admitted(source):
+        # Group events are about this node's own crews: an outsider added to
+        # one is exactly what an allowlisted node must hear about.
+        is_group = isinstance(kind, str) and kind.startswith("group_")
+        if source and source != self.address and not is_group and not self.admitted(source):
             return  # a peer outside the allowlist: not even on the radar
         handler = getattr(self, f"_ev_{kind}", None)
         if handler is not None:

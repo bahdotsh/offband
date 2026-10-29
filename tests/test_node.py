@@ -464,3 +464,20 @@ async def test_concurrent_crew_loads_leave_once(tmp_path):
     n.address = ME
     await asyncio.gather(n._load_crew(), n._load_crew(), n._load_crew())
     assert _leaves(api) == 1
+
+
+async def test_an_outsider_added_to_the_crew_is_heard_of_under_allow(tmp_path):
+    import asyncio
+
+    api = CrewApi([ME, ADA])
+    n = Node(api, "Me", tmp_path, allow=[ADA])  # type: ignore[arg-type]
+    n.address = ME
+    await n._load_crew()
+    await asyncio.gather(*n._tasks)  # what adopting the crew set off
+    api.members = [ME, ADA, EVE]
+    await n._on_event({"type": "group_member_added", "group_id": "g1", "peer_id": EVE})
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert _leaves(api) == 1 and n.crew is None
+    for task in list(n._tasks):
+        task.cancel()
