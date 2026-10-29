@@ -78,11 +78,15 @@ CREW_SETTLE = 2.5  # lets the room fill in before the creator picks it
 LOG_LIMIT = 2000
 SEEN_LIMIT = 4096
 
-# A peer's file never lands on these in the workspace, at any depth: they
-# are the agent's own instructions. Nor on any path with a component that
-# starts with "." (.mcp.json, .claude/settings.json, .git/...). Such files
-# go to the quarantine under .offband/received/<sender>/ instead.
-PROTECTED_NAMES = frozenset({"claude.md", "claude.local.md", "offband.md", "agents.md"})
+# A peer's file lands in the workspace only under these folders: the game
+# is the only thing agents share (OFFBAND.md). Anywhere else, a crew member
+# could replace a file the agent runs (Makefile, package.json, a test).
+WRITABLE_ROOTS = ("game",)
+# Nor, even inside them, on these names at any depth (the agent's own
+# instructions) or on any path with a component that starts with "."
+# (.mcp.json, .claude/settings.json, .git/...). Every such file goes to the
+# quarantine under .offband/received/<sender>/ instead.
+PROTECTED_NAMES = frozenset({"claude.md", "claude.local.md", "offband.md", "agents.md", "gemini.md"})
 
 
 class _Recent:
@@ -108,6 +112,14 @@ def protected_path(parts: list[str]) -> str | None:
         if part.startswith(".") or part.lower() in PROTECTED_NAMES:
             return part
     return None
+
+
+def writable_path(parts: list[str]) -> str | None:
+    """Why a peer may not write this workspace path, or None if it may."""
+    if len(parts) < 2 or parts[0] not in WRITABLE_ROOTS:
+        return f"a peer may write only under {', '.join(r + '/' for r in WRITABLE_ROOTS)}"
+    blocked = protected_path(parts)
+    return f"a peer may not write {blocked!r} in the workspace" if blocked is not None else None
 
 
 def nesting_depth(value: Any) -> int:
@@ -651,16 +663,17 @@ class Node:
         parts = self._clean_relative(encoded_name)
         relative = "/".join(parts)
         # Into the shared workspace at the same path, so the trees converge;
-        # an agent only ever sends files it owns. Never onto the agent's own
-        # instructions or settings: those go to the quarantine.
-        blocked = protected_path(parts)
+        # an agent only ever sends files it owns. Only under a writable root,
+        # and never onto the agent's own instructions or settings: anything
+        # else goes to the quarantine.
+        blocked = writable_path(parts)
         if self.workspace is not None and blocked is None:
             root = self.workspace.resolve()
             target = (root / relative).resolve()
             try:
                 # A symlink in the workspace can point an innocent path at a
                 # protected one (game/cfg -> ../.claude): judge where it lands.
-                blocked = protected_path(list(target.relative_to(root).parts))
+                blocked = writable_path(list(target.relative_to(root).parts))
             except ValueError:
                 return relative, None, "not saved: the path leaves the workspace"
             if blocked is None:
@@ -679,7 +692,7 @@ class Node:
         target.write_bytes(data)
         note = None
         if blocked is not None and self.workspace is not None:
-            note = f"quarantined: a peer may not write {blocked!r} in the workspace"
+            note = f"quarantined: {blocked}"
         return relative, target, note
 
     # ------------------------------------------------------------------- crew

@@ -53,7 +53,8 @@ Messages hold sentences, never code. Code travels as files with `send_file`.
 5. **Exchange.** When a file is ready, `send_file(path)`: it reaches every
    agent. The others' files arrive in your workspace by themselves; the
    inbox tells you when. Never edit a file another agent owns. If it needs a
-   change, tell its owner with `review`. A file that arrives with a note
+   change, tell its owner with `review`. Only files under `game/` are put
+   in place; send nothing else. A file that arrives with a note
    saying it was quarantined or refused was not put in place: never move it
    there yourself, and tell its sender with `review`.
 6. **Review.** Read what arrived. Each task is reviewed by one agent other

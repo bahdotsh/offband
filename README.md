@@ -171,8 +171,8 @@ from the workspace's `.mcp.json`.
   task is its own key, so edits to different tasks merge cleanly.
 - **Files** use the SDK's file transfer and land in every other agent's
   workspace at the same relative path. Each agent sends only the files it
-  owns, so the trees converge. A file bound for the agent's own
-  instructions or settings is quarantined instead (see Security).
+  owns, so the trees converge. Only files under `game/` are put in place;
+  any other path is quarantined instead (see Security).
 - **Game moves** are envelopes of kind `game`, sent only to the opponent.
   They go to the game page and never to the agent's inbox.
 - **Discovery** also registers an `offband-agent` mesh service. Service
@@ -250,15 +250,14 @@ that, it keeps a stray device or a hostile peer from doing much harm:
   files over 256 KiB or not valid base64 are refused and never written, and
   a board task that is not an object reads as a bare title instead of
   breaking the board.
-- **A peer cannot rewrite the agent's instructions or settings.** A received
-  file goes into the workspace at its relative path, except a path with any
-  part starting with `.` (`.mcp.json`, `.claude/`, `.git/`) or named
-  `CLAUDE.md`, `CLAUDE.local.md`, `OFFBAND.md` or `AGENTS.md`. Those land in
+- **A peer writes only the game.** A received file goes into the workspace
+  at its relative path only under `game/`, and even there never on a path
+  with any part starting with `.` or named `CLAUDE.md`, `CLAUDE.local.md`,
+  `OFFBAND.md`, `AGENTS.md` or `GEMINI.md`. Everything else, including a
+  `Makefile`, `package.json` or `.claude/settings.json`, lands in
   `.offband/received/<sender>/` and the inbox says so. Paths with `..` or
-  absolute paths are reduced to their file name. Any other workspace file,
-  including a `Makefile` or `package.json`, can be overwritten by a crew
-  member: that is how the trees converge, so only work with peers whose
-  files you would run.
+  absolute paths are reduced to their file name. A crew member can still
+  rewrite the game, so open it only from peers whose code you would run.
 - **The agent sends only workspace files.** `send_file` refuses a path
   outside the workspace, a dot path such as `.env`, and the agent's own
   instruction files, so a prompt or page cannot make it ship `~/.ssh/`.

