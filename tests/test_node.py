@@ -357,3 +357,26 @@ async def test_a_peer_rotating_names_is_warned_about_once(node, caplog):
         await receive(node, ADA, envelope("chat", "hi", name=name))
     assert node.peers[ADA].name == "Ada"
     assert caplog.text.count("now claims the name") == 1
+
+
+# ------------------------------------------------- fourth review follow-ups
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+async def test_a_body_that_is_not_strict_json_reads_as_chat(node, token):
+    raw = '{"ob": 1, "kind": "task", "from": "Ada", "body": {"x": ' + token + "}}"
+    await receive(node, ADA, raw)
+    assert last(node).kind == "chat" and last(node).body == raw
+    json.dumps(node.state(), allow_nan=False)
+
+
+async def test_a_board_task_holding_nan_reads_as_a_title(tmp_path):
+    n = Node(BoardApi({"tasks": {"t": '{"title": NaN}'}}), "Me", tmp_path)  # type: ignore[arg-type]
+    n.address = ME
+    board = await n.board_get()
+    json.dumps(board, allow_nan=False)
+    assert board["tasks"][0]["id"] == "t"
+
+
+def test_a_crew_merge_ignores_a_stamp_that_is_not_finite():
+    assert _stamp(json.dumps({"updated_at": "nan"})) == 0.0
+    assert _stamp(json.dumps({"updated_at": "inf"})) == 0.0

@@ -37,6 +37,7 @@ import binascii
 import itertools
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -120,6 +121,17 @@ def writable_path(parts: list[str]) -> str | None:
         return f"a peer may write only under {', '.join(r + '/' for r in WRITABLE_ROOTS)}"
     blocked = protected_path(parts)
     return f"a peer may not write {blocked!r} in the workspace" if blocked is not None else None
+
+
+def _not_json(token: str) -> Any:
+    raise ValueError(f"{token} is not JSON")
+
+
+def peer_json(text: str) -> Any:
+    """Parses JSON a peer wrote. Python's parser also takes NaN and
+    Infinity, which no JSON encoder downstream accepts: the API would answer
+    500 and the radar could not parse its state. They are refused here."""
+    return json.loads(text, parse_constant=_not_json)
 
 
 def nesting_depth(value: Any) -> int:
@@ -907,8 +919,8 @@ class Node:
             # Every crew member writes the board, so a task may hold any
             # JSON at all: anything but an object reads as a bare title.
             try:
-                task = json.loads(value) if isinstance(value, str) else value
-            except (ValueError, RecursionError):
+                task = peer_json(value) if isinstance(value, str) else value
+            except (ValueError, RecursionError):  # not JSON, or NaN
                 task = None
             if not isinstance(task, dict):
                 task = {"title": str(value)[:200]}
@@ -1117,7 +1129,7 @@ class Node:
             kind, body, sender_name, audience = "chat", f"[a message of {chars} chars, too long to show]", None, None
         else:
             try:
-                envelope = json.loads(content)
+                envelope = peer_json(content)
                 if not isinstance(envelope, dict) or envelope.get("ob") != ENVELOPE_VERSION:
                     raise ValueError
                 kind = str(envelope.get("kind"))
@@ -1126,7 +1138,7 @@ class Node:
                 audience = "all" if envelope.get("to") == "all" else None
                 if nesting_depth(body) > MAX_BODY_DEPTH:
                     raise ValueError
-            except (ValueError, RecursionError):  # not JSON, or nested too deep
+            except (ValueError, RecursionError):  # not JSON, NaN, or nested too deep
                 kind, body, sender_name, audience = "chat", content, None, None
         if kind not in INBOUND_KINDS:
             kind = "chat"  # an unknown kind, or one only the node may make ("file")
@@ -1302,9 +1314,10 @@ def _stamp(value: Any) -> float:
     """When a board task was last edited, from its stored JSON; 0 if unknown."""
     try:
         task = json.loads(value) if isinstance(value, str) else value
-        return float(task.get("updated_at") or 0)
+        stamp = float(task.get("updated_at") or 0)
     except (ValueError, TypeError, AttributeError):
         return 0.0
+    return stamp if math.isfinite(stamp) else 0.0
 
 
 def _trim_event(event: dict[str, Any]) -> dict[str, Any]:
