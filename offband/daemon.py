@@ -89,8 +89,12 @@ class Guard:
                 return
             if host != GAME_HOST and is_game_page(path):
                 port = (scope.get("server") or ("", 0))[1]
+                # The path as the client sent it, still percent-encoded: the
+                # decoded one would put raw spaces in Location and turn an
+                # encoded slash into a real one.
+                raw_path = (scope.get("raw_path") or path.encode("utf-8")).decode("latin-1")
                 query = scope.get("query_string", b"").decode("latin-1")
-                location = f"http://{GAME_HOST}:{port}{path}" + (f"?{query}" if query else "")
+                location = f"http://{GAME_HOST}:{port}{raw_path}" + (f"?{query}" if query else "")
                 await Response(status_code=307, headers={"Location": location})(scope, receive, send)
                 return
             needs_header = path.startswith("/api/") and path not in UNGUARDED_API

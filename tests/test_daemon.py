@@ -116,3 +116,25 @@ async def test_the_game_moves_off_the_control_origin(client):
 async def test_a_wait_too_large_for_a_float_is_a_client_error(client):
     r = await client.get("/api/peers?wait=" + "9" * 400, headers={"X-Offband": "1"})
     assert r.status_code == 400 and "finite" in r.json()["error"]
+
+
+async def test_the_game_redirect_keeps_the_path_encoded(node):
+    scope_path = "/game/a b/c%2Fd.js"
+    app = build_app(node)
+    out: dict[str, Any] = {}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            out["status"] = message["status"]
+            out["headers"] = dict(message["headers"])
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
+             "scheme": "http", "path": scope_path, "raw_path": b"/game/a%20b/c%2Fd.js", "root_path": "",
+             "query_string": b"", "headers": [(b"host", b"127.0.0.1:7777")], "client": ("127.0.0.1", 1),
+             "server": ("127.0.0.1", 7777)}
+    await app(scope, receive, send)
+    assert out["status"] == 307
+    assert out["headers"][b"location"] == b"http://localhost:7777/game/a%20b/c%2Fd.js"
