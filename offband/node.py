@@ -763,6 +763,8 @@ class Node:
         if best is None:
             return
         _, gid, members = best
+        # Clean again: should it take in an outsider later, leave it again.
+        self._left_groups.discard(gid)
         changed = gid != self.crew or members != self.crew_members
         previous = self.crew
         self.crew, self.crew_members = gid, members

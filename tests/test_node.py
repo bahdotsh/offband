@@ -391,3 +391,29 @@ async def test_a_quarantined_file_never_keeps_a_name_agents_load(node, name, sav
     assert body["path"] == name.replace("%2F", "/")
     root = node.files_dir / ADA[:24]
     assert Path(body["saved_to"]).relative_to(root).as_posix() == saved
+
+
+async def test_a_crew_that_takes_in_an_outsider_again_is_left_again(tmp_path):
+    class Api(FakeApi):
+        members = [ME, ADA, EVE]
+
+        async def call(self, method, params=None, timeout=60.0):
+            if method == "list_groups":
+                return ["g1"]
+            if method == "get_group_info":
+                return {"name": "offband-crew", "members": list(self.members)}
+            return await super().call(method, params, timeout)
+
+    api = Api()
+    n = Node(api, "Me", tmp_path, allow=[ADA])  # type: ignore[arg-type]
+    n.address = ME
+    await n._load_crew()  # outsider: left
+    api.members = [ME, ADA]
+    await n._load_crew()  # clean again: adopted
+    assert n.crew == "g1"
+    api.members = [ME, ADA, EVE]
+    await n._load_crew()  # outsider again: left again
+    assert n.crew is None
+    assert len([c for c in api.calls if c[0] == "leave_group"]) == 2
+    for task in list(n._tasks):
+        task.cancel()
