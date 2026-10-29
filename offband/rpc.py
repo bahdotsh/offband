@@ -27,10 +27,12 @@ EventHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
 # The service's own inbound frame limit: its 100 MiB file limit as base64,
 # plus 1 MiB. Our limit must be at least as large, or one large file from
 # any peer closes this connection. Offband enforces its own, much smaller,
-# file limit in code (see ``max_file_chars``).
+# file limit in code (see ``max_file_chars``). The fallback, the same
+# number, keeps this client usable where the SDK's server package is absent
+# or fails to import; the client needs only its socket, not its code.
 try:
     from offline_protocol_sdk.local_api import MAX_MESSAGE_SIZE as MAX_FRAME
-except ImportError:  # the tests run without the SDK
+except Exception:
     MAX_FRAME = 100 * 1024 * 1024 * 4 // 3 + 1024 * 1024
 
 # The event queue is unbounded (the reader must never block), so a backlog
