@@ -247,3 +247,53 @@ async def test_send_file_refuses_the_agents_private_files(node, name):
     target.write_text("secret")
     with pytest.raises(NodeError, match="private"):
         await node.send_file(ADA, name)
+
+
+# ------------------------------------------------- second review follow-ups
+
+class BoardApi(FakeApi):
+    """A crew whose board a member filled with values that are not objects."""
+
+    def __init__(self, board: dict) -> None:
+        super().__init__()
+        self.board = board
+
+    async def call(self, method, params=None, timeout=60.0):
+        if method == "list_groups":
+            return ["g1"]
+        if method == "get_group_info":
+            return {"name": "offband-crew", "members": [ME, ADA]}
+        if method == "data.doc_json":
+            return json.dumps(self.board)
+        return await super().call(method, params, timeout)
+
+
+@pytest.mark.parametrize("value", ["[1, 2]", "null", "42", '"text"', "{not json"])
+async def test_a_task_that_is_not_an_object_reads_as_a_title(tmp_path, value):
+    api = BoardApi({"tasks": {"ok": json.dumps({"title": "fine"}), "bad": value}, "notes": {"plan": ["x"]}})
+    n = Node(api, "Me", tmp_path)  # type: ignore[arg-type]
+    n.address = ME
+    board = await n.board_get()
+    assert {t["id"] for t in board["tasks"]} == {"ok", "bad"}
+    assert all(isinstance(t, dict) for t in board["tasks"])
+    assert isinstance(board["notes"]["plan"], str)
+    await n.board_update(remove=["bad"])  # the agent can still repair it
+    assert ("data.map_delete", {"space_id": "g1", "doc_id": "board", "collection": "tasks", "key": "bad"}) in api.calls
+    for task in list(n._tasks):
+        task.cancel()
+
+
+async def test_a_board_that_is_not_an_object_is_empty(tmp_path):
+    n = Node(BoardApi({"tasks": [1, 2], "notes": "x"}), "Me", tmp_path)  # type: ignore[arg-type]
+    n.address = ME
+    board = await n.board_get()
+    assert board["tasks"] == [] and board["notes"] == {}
+
+
+async def test_a_failing_board_push_is_logged_not_raised(node, monkeypatch, caplog):
+    async def boom():
+        raise KeyError("x")
+
+    monkeypatch.setattr(node, "board_get", boom)
+    await node._push_board()
+    assert "board not pushed" in caplog.text

@@ -411,18 +411,21 @@ function renderBoard(board) {
     col.className = "col";
     col.dataset.status = status;
     col.innerHTML = `<h3>${label}</h3>`;
-    const tasks = (board.tasks || []).filter((t) => (t.status || "todo") === status);
+    // Every crew member writes the board: never trust a field's type.
+    const text = (v) => (typeof v === "string" ? v : v == null ? "" : String(v));
+    const tasks = (Array.isArray(board.tasks) ? board.tasks : [])
+      .filter((t) => t && typeof t === "object" && (text(t.status) || "todo") === status);
     for (const t of tasks) {
       const card = document.createElement("div");
-      const owner = t.owner || "";
+      const owner = text(t.owner);
       const mine = owner && me.name && owner.toLowerCase() === me.name.toLowerCase();
       card.className = "task " + (owner ? (mine ? "me" : "peer") : "");
       const c = !mine && colorByName(owner);
       if (c) card.style.setProperty("--c", c);
       card.innerHTML = `<div class="t"></div><div class="o"></div><div class="f"></div>`;
-      card.querySelector(".t").textContent = t.title || t.id;
+      card.querySelector(".t").textContent = text(t.title) || text(t.id);
       card.querySelector(".o").textContent = owner ? owner : "unassigned";
-      const files = Array.isArray(t.files) ? t.files.join(", ") : (t.files || "");
+      const files = Array.isArray(t.files) ? t.files.map(text).join(", ") : text(t.files);
       card.querySelector(".f").textContent = files;
       const key = JSON.stringify(t);
       if (lastBoard.size && lastBoard.get(t.id) !== key) card.classList.add("flash");
@@ -441,7 +444,7 @@ async function loadBoard() {
   if (!shown.length) return;
   try {
     const r = await fetch("/api/board", { headers: { "X-Offband": "1" } });
-    if (r.ok) renderBoard(await r.json());
+    if (r.ok) renderBoard(await r.json());  // a throw lands in the catch below
   } catch (_) { /* the stream will bring it */ }
 }
 
@@ -479,7 +482,9 @@ function connect() {
       case "link": link = ev.transport; renderNodes(); break;
       case "msg": launch(ev.msg); updateLog(ev.msg); subtitle(ev.msg); break;
       case "status": settle(ev.msg); break;
-      case "board": renderBoard(ev.board); break;
+      case "board":
+        try { renderBoard(ev.board); } catch (err) { console.error("board not shown", err); }
+        break;
     }
   };
 }

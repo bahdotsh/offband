@@ -767,7 +767,8 @@ class Node:
                     moved += 1
             if moved:
                 await self.api.call("data.flush", space)
-        except (RpcError, ConnectionError, ValueError) as exc:
+        except (RpcError, ConnectionError, ValueError, AttributeError, TypeError) as exc:
+            # AttributeError, TypeError: a board a peer filled with non-objects.
             logger.info("board not moved to the new crew: %s", exc)
         self._board_dirty = True
         await self._push_board()
@@ -877,15 +878,22 @@ class Node:
         await self.api.call("data.create_doc", space)
         raw = json.loads(await self.api.call("data.doc_json", space))
         tasks = []
-        for key, value in (raw.get("tasks") or {}).items():
+        tasks_raw = raw.get("tasks") if isinstance(raw, dict) else None
+        notes_raw = raw.get("notes") if isinstance(raw, dict) else None
+        for key, value in (tasks_raw if isinstance(tasks_raw, dict) else {}).items():
+            # Every crew member writes the board, so a task may hold any
+            # JSON at all: anything but an object reads as a bare title.
             try:
-                task = json.loads(value) if isinstance(value, str) else dict(value)
-            except (ValueError, TypeError):
-                task = {"title": str(value)}
-            task["id"] = key
+                task = json.loads(value) if isinstance(value, str) else value
+            except (ValueError, RecursionError):
+                task = None
+            if not isinstance(task, dict):
+                task = {"title": str(value)[:200]}
+            task["id"] = str(key)
             tasks.append(task)
         tasks.sort(key=lambda t: (str(t.get("order", "")).zfill(4), t["id"]))
-        notes = {k: v for k, v in (raw.get("notes") or {}).items()}
+        notes = {str(k): v if isinstance(v, str) else json.dumps(v)
+                 for k, v in (notes_raw if isinstance(notes_raw, dict) else {}).items()}
         view = self.crew_view() or {}
         return {"crew": view.get("members", []), "notes": notes, "tasks": tasks}
 
@@ -1227,9 +1235,14 @@ class Node:
         self._spawn(self._load_crew())
 
     async def _push_board(self) -> None:
+        # Best effort, in a task of its own: a failure is logged, never left
+        # as an unretrieved task exception.
         try:
             board = await self.board_get()
         except (RpcError, NodeError, ConnectionError):
+            return
+        except Exception:
+            logger.exception("board not pushed to the radar")
             return
         self._emit({"t": "board", "board": board})
 
