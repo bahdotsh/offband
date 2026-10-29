@@ -204,14 +204,15 @@ def build_app(node: Node, game_dir: Path | None = None) -> Starlette:
             return PlainTextResponse("no game directory", status_code=404)
         root = root.resolve()
         relative = request.path_params.get("path") or "index.html"
-        target = (root / relative).resolve()
         try:
+            target = (root / relative).resolve()
             target.relative_to(root)
-        except ValueError:
+            if target.is_dir():
+                target = target / "index.html"
+            found = target.is_file()
+        except (ValueError, OSError):  # outside the root, a NUL, or a name too long
             return PlainTextResponse("not found", status_code=404)
-        if target.is_dir():
-            target = target / "index.html"
-        if not target.is_file():
+        if not found:
             if relative == "index.html":
                 return FileResponse(WEB / "waiting.html")
             return PlainTextResponse("not found", status_code=404)

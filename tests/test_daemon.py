@@ -144,3 +144,10 @@ async def test_a_cors_preflight_is_never_answered(client):
     r = await client.options("/api/send", headers={"Origin": "http://evil.example",
                                                    "Access-Control-Request-Method": "POST"})
     assert r.status_code == 403 and "access-control-allow-origin" not in r.headers
+
+
+@pytest.mark.parametrize("path", ["/game/a\x00b", "/game/" + "x" * 5000])
+async def test_a_game_path_that_cannot_be_resolved_is_not_found(node, path):
+    (node.workspace / "game").mkdir()
+    status, _ = await raw_get(build_app(node), path, host=b"localhost:7777")
+    assert status == 404
