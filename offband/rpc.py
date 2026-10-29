@@ -7,7 +7,8 @@ callback in the order the service sent them.
 
 The reader task only routes frames. Events are handed to a separate
 dispatcher task, so an event handler may itself call the API: its response
-is read by the reader while the handler waits on it.
+is read by the reader while the handler waits on it. The queue between them
+is bounded: under a flood, the oldest waiting events are dropped.
 """
 
 from __future__ import annotations
@@ -35,9 +36,13 @@ try:
 except Exception:
     MAX_FRAME = 100 * 1024 * 1024 * 4 // 3 + 1024 * 1024
 
-# The event queue is unbounded (the reader must never block), so a backlog
-# this deep is logged once each time it is reached.
-QUEUE_WARN = 5000
+# The reader must never block (it also routes responses), so when this many
+# events wait for their handlers the oldest is dropped instead. Each event's
+# payload is already capped by shedding, so this bounds the memory a
+# flooding peer can hold. Drops are logged once per DROP_LOG_EVERY.
+QUEUE_LIMIT = 5000
+DROP_LOG_EVERY = 1000
+
 
 class RpcError(Exception):
     """A JSON-RPC error. ``variant`` is the engine's ProtocolError name."""
@@ -69,6 +74,7 @@ class LocalApi:
         # The same for a message_received event's content, its length kept
         # in ``content_chars``.
         self.max_content_chars: int | None = None
+        self.dropped_events = 0
         self.closed = asyncio.Event()
 
     async def connect(self, timeout: float = 60.0) -> dict[str, Any]:
@@ -84,7 +90,7 @@ class LocalApi:
                     raise
                 await asyncio.sleep(0.5)
         self.closed.clear()
-        self._events = asyncio.Queue()
+        self._events = asyncio.Queue(maxsize=QUEUE_LIMIT)
         self._dispatcher = asyncio.create_task(self._dispatch(self._events))
         self._reader = asyncio.create_task(self._read(self._events))
         hello = await self.call("hello", {"app_id": self.app_id, "client": self.client_name})
@@ -110,9 +116,7 @@ class LocalApi:
                     if waiter is not None and not waiter.done():
                         waiter.set_result(message)
                 elif message.get("method") == "event" and isinstance(message.get("params"), dict):
-                    events.put_nowait(self._shed(message["params"]))
-                    if events.qsize() == QUEUE_WARN:
-                        logger.warning("%d events wait for their handlers; a peer may be flooding", QUEUE_WARN)
+                    self._enqueue(events, self._shed(message["params"]))
         except Exception as exc:
             reason = f"connection closed: {exc}"
         finally:
@@ -120,14 +124,30 @@ class LocalApi:
                 if not waiter.done():
                     waiter.set_exception(ConnectionError(reason))
             self._pending.clear()
-            events.put_nowait(None)
+            self._enqueue(events, None)
             self.closed.set()
+
+    def _enqueue(self, events: asyncio.Queue[dict[str, Any] | None], event: dict[str, Any] | None) -> None:
+        """Queues an event without ever blocking: when the queue is full,
+        the oldest waiting event is dropped to make room."""
+        while True:
+            try:
+                events.put_nowait(event)
+                return
+            except asyncio.QueueFull:
+                try:
+                    events.get_nowait()
+                except asyncio.QueueEmpty:
+                    continue
+                if self.dropped_events % DROP_LOG_EVERY == 0:
+                    logger.warning("%d events wait for their handlers; dropping the oldest (a peer may be "
+                                   "flooding, %d dropped so far)", events.maxsize, self.dropped_events + 1)
+                self.dropped_events += 1
 
     def _shed(self, event: dict[str, Any]) -> dict[str, Any]:
         """Drops a file payload over ``max_file_chars``, or message content
-        over ``max_content_chars``, before the event is queued. The reader
-        must never block (it also routes responses), so the queue is
-        unbounded; shedding here keeps it from holding large payloads."""
+        over ``max_content_chars``, before the event is queued, so the
+        queue never holds large payloads."""
         kind = event.get("type")
         if kind == "file_received":
             field, limit = "file_data", self.max_file_chars

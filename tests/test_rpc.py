@@ -91,3 +91,24 @@ async def test_a_response_without_a_result_is_an_error():
         with pytest.raises(RpcError, match="without a result"):
             await api.call("list_groups", timeout=5)
         await api.close()
+
+
+async def test_a_full_event_queue_drops_the_oldest(caplog):
+    import offband.rpc as rpc
+
+    api = LocalApi("/nowhere", "offband")
+    queue: asyncio.Queue = asyncio.Queue(maxsize=3)
+    for i in range(5):
+        api._enqueue(queue, {"type": "e", "n": i})
+    assert [queue.get_nowait()["n"] for _ in range(3)] == [2, 3, 4]
+    assert api.dropped_events == 2
+    assert caplog.text.count("dropping the oldest") == 1
+    assert rpc.QUEUE_LIMIT > 0
+
+
+async def test_the_end_of_stream_marker_is_queued_even_when_full():
+    api = LocalApi("/nowhere", "offband")
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    api._enqueue(queue, {"type": "e"})
+    api._enqueue(queue, None)
+    assert queue.get_nowait() is None
