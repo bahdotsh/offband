@@ -151,3 +151,19 @@ async def test_a_game_path_that_cannot_be_resolved_is_not_found(node, path):
     (node.workspace / "game").mkdir()
     status, _ = await raw_get(build_app(node), path, host=b"localhost:7777")
     assert status == 404
+
+
+async def test_a_value_json_cannot_hold_is_a_json_error(client, node, monkeypatch):
+    monkeypatch.setattr(node, "state", lambda: {"x": float("nan")})
+    r = await client.get("/api/state", headers={"X-Offband": "1"})
+    assert r.status_code == 500 and "error" in r.json()
+
+
+async def test_an_event_stream_skips_a_frame_that_is_not_strict_json():
+    from offband.daemon import _sse
+
+    response = _sse(lambda push: (lambda: None), initial=[{"t": "state", "x": float("nan")}, {"t": "ok"}])
+    frames = response.body_iterator
+    assert await frames.__anext__() == ""
+    assert await frames.__anext__() == 'data: {"t": "ok"}\n\n'
+    await frames.aclose()

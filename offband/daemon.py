@@ -123,9 +123,11 @@ def api(handler: Callable[[Request], Awaitable[Any]]) -> Callable[[Request], Awa
     async def wrapped(request: Request) -> Response:
         try:
             result = await handler(request)
+            # Built inside the try: a value JSON cannot hold (NaN, say) is
+            # a JSON error like any other, not a bare 500.
+            return result if isinstance(result, Response) else JSONResponse(result)
         except Exception as exc:
             return _error(exc)
-        return result if isinstance(result, Response) else JSONResponse(result)
 
     return wrapped
 
@@ -167,15 +169,24 @@ def _sse(subscribe: Callable[[Callable[[dict[str, Any]], None]], Callable[[], No
         except asyncio.QueueFull:
             pass  # a stalled page loses events, never the node
 
+    def frame(event: dict[str, Any]) -> str:
+        # Strict JSON: the page's JSON.parse rejects NaN, and one bad frame
+        # (the initial state above all) would leave the page blank.
+        try:
+            return f"data: {json.dumps(event, allow_nan=False)}\n\n"
+        except (TypeError, ValueError, RecursionError):
+            logger.warning("dropped a %s event that is not valid JSON", event.get("t", "stream"))
+            return ""
+
     async def stream() -> AsyncIterator[str]:
         unsubscribe = subscribe(push)
         try:
             for event in initial or []:
-                yield f"data: {json.dumps(event)}\n\n"
+                yield frame(event)
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), 15.0)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield frame(event)
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
         finally:
