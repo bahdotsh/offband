@@ -239,6 +239,7 @@ class Node:
         self.crew: str | None = None  # the crew's group id
         self.crew_members: list[str] = []
         self._crew_lock = asyncio.Lock()
+        self._left_groups: set[str] = set()
 
     # ------------------------------------------------------------------ setup
 
@@ -724,13 +725,15 @@ class Node:
             key = (-len(members), gid, members)
             if best is None or key[:2] < best[:2]:
                 best = key
-        for gid in refused:
+        for gid in refused - self._left_groups:
             # A crew that took in a peer outside the allowlist (another member
             # invited it): leave the MLS group, so this node neither writes
             # the board where the outsider reads nor stays on its roster.
+            # Once: the group may list us a while after the leave.
             logger.warning("crew %s holds a peer outside --allow; leaving it", gid)
             try:
                 await self.api.call("leave_group", {"group_id": gid})
+                self._left_groups.add(gid)
             except (RpcError, ConnectionError) as exc:
                 logger.warning("could not leave crew %s: %s", gid, exc)
         if self.crew in refused:

@@ -335,3 +335,20 @@ async def test_a_peer_writes_only_under_the_game_folder(node, name):
     assert not (node.workspace / name.replace("%2F", "/")).is_file()
 
 
+async def test_a_refused_crew_is_left_once(tmp_path):
+    class Api(FakeApi):
+        async def call(self, method, params=None, timeout=60.0):
+            if method == "list_groups":
+                return ["g1"]
+            if method == "get_group_info":
+                return {"name": "offband-crew", "members": [ME, ADA, EVE]}
+            return await super().call(method, params, timeout)
+
+    api = Api()
+    n = Node(api, "Me", tmp_path, allow=[ADA])  # type: ignore[arg-type]
+    n.address = ME
+    for _ in range(3):
+        await n._load_crew()
+    assert [c for c in api.calls if c[0] == "leave_group"] == [("leave_group", {"group_id": "g1"})]
+
+
