@@ -33,7 +33,9 @@ try:
 except ImportError:  # the tests run without the SDK
     MAX_FRAME = 100 * 1024 * 1024 * 4 // 3 + 1024 * 1024
 
-
+# The event queue is unbounded (the reader must never block), so a backlog
+# this deep is logged once each time it is reached.
+QUEUE_WARN = 5000
 
 class RpcError(Exception):
     """A JSON-RPC error. ``variant`` is the engine's ProtocolError name."""
@@ -107,6 +109,8 @@ class LocalApi:
                         waiter.set_result(message)
                 elif message.get("method") == "event" and isinstance(message.get("params"), dict):
                     events.put_nowait(self._shed(message["params"]))
+                    if events.qsize() == QUEUE_WARN:
+                        logger.warning("%d events wait for their handlers; a peer may be flooding", QUEUE_WARN)
         except Exception as exc:
             reason = f"connection closed: {exc}"
         finally:
