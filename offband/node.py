@@ -1140,7 +1140,9 @@ class Node:
         encoded = event.get("file_data")
         shed = event.get("file_data_chars")
         if not isinstance(encoded, str) and not isinstance(shed, int):
-            return  # no payload at all: nothing to save, and no empty file
+            # No payload at all: nothing to save, and no empty file.
+            logger.warning("a file from %s arrived without data; dropped", short(sender))
+            return
         encoded = encoded if isinstance(encoded, str) else ""
         name = event.get("file_name")
         name = name if isinstance(name, str) and name else "file"

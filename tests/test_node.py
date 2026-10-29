@@ -497,3 +497,9 @@ async def test_an_allowlisted_crew_is_not_looked_up_on_every_read(tmp_path):
     assert len([c for c in api.calls if c[0] == "list_groups"]) >= 2
     for task in list(n._tasks):
         task.cancel()
+
+
+async def test_a_file_event_without_data_is_logged(node, caplog):
+    await node._on_event({"type": "file_received", "sender": ADA, "file_name": "a.txt", "file_data": None,
+                          "file_id": "f-none"})
+    assert not node.log and "without data" in caplog.text
