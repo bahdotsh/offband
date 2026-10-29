@@ -352,3 +352,8 @@ async def test_a_refused_crew_is_left_once(tmp_path):
     assert [c for c in api.calls if c[0] == "leave_group"] == [("leave_group", {"group_id": "g1"})]
 
 
+async def test_a_peer_rotating_names_is_warned_about_once(node, caplog):
+    for name in ("Ada", "Grace", "Linus", "Eve"):
+        await receive(node, ADA, envelope("chat", "hi", name=name))
+    assert node.peers[ADA].name == "Ada"
+    assert caplog.text.count("now claims the name") == 1

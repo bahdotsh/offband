@@ -240,6 +240,7 @@ class Node:
         self.crew_members: list[str] = []
         self._crew_lock = asyncio.Lock()
         self._left_groups: set[str] = set()
+        self._name_conflicts: set[str] = set()  # addresses already warned about
 
     # ------------------------------------------------------------------ setup
 
@@ -1245,7 +1246,10 @@ class Node:
             peer.name = name
             self._emit({"t": "peer", "peer": peer.view()})
         elif peer.name != name:
-            logger.warning("%s now claims the name %r; keeping %r", short(peer.address), name, peer.name)
+            # Once per address: a peer rotating names must not flood the log.
+            log = logger.debug if peer.address in self._name_conflicts else logger.warning
+            self._name_conflicts.add(peer.address)
+            log("%s now claims the name %r; keeping %r", short(peer.address), name, peer.name)
 
     async def _ev_data_changed(self, event: dict[str, Any]) -> None:
         if event.get("doc_id") != BOARD_DOC:
