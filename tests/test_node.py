@@ -516,3 +516,51 @@ async def test_an_edit_is_stamped_after_the_version_it_came_from(tmp_path):
     assert stored["updated_at"] > future
     for task in list(n._tasks):
         task.cancel()
+
+
+async def test_a_crew_merge_moves_only_the_newer_tasks(tmp_path):
+    class TwoBoards(FakeApi):
+        boards = {
+            "old": {"tasks": {"a": json.dumps({"v": "old-newer", "updated_at": 9}),
+                              "b": json.dumps({"v": "old-older", "updated_at": 1}),
+                              "c": json.dumps({"v": "only-old"})},
+                    "notes": {"plan": "old plan", "extra": "kept"}},
+            "new": {"tasks": {"a": json.dumps({"v": "new-older", "updated_at": 2}),
+                              "b": json.dumps({"v": "new-newer", "updated_at": 5})},
+                    "notes": {"plan": "new plan"}},
+        }
+
+        async def call(self, method, params=None, timeout=60.0):
+            if method == "data.doc_json":
+                return json.dumps(self.boards[params["space_id"]])
+            return await super().call(method, params, timeout)
+
+    api = TwoBoards()
+    n = Node(api, "Me", tmp_path)  # type: ignore[arg-type]
+    n.address = ME
+    await n._move_board("old", "new")
+    moved = {(c[1]["collection"], c[1]["key"]) for c in api.calls if c[0] == "data.map_set"}
+    assert moved == {("tasks", "a"), ("tasks", "c"), ("notes", "extra")}
+
+
+async def test_the_topology_snapshot_honours_the_allowlist(tmp_path):
+    class Topology(FakeApi):
+        async def call(self, method, params=None, timeout=60.0):
+            if method == "get_topology":
+                return {"nodes": [{"id": ADA}, {"id": EVE}, "junk", {"id": ME}]}
+            return await super().call(method, params, timeout)
+
+    n = Node(Topology(), "Me", tmp_path, allow=[ADA])  # type: ignore[arg-type]
+    n.address = ME
+    await n._snapshot_neighbors()
+    assert set(n.peers) == {ADA}
+    for task in list(n._tasks):
+        task.cancel()
+
+
+async def test_a_hellos_capabilities_are_capped(node):
+    caps = {f"k{i}" + "x" * 100: "v" * 1000 for i in range(50)}
+    await receive(node, ADA, envelope("hello", {"name": "Ada", "capabilities": caps}))
+    got = node.peers[ADA].capabilities
+    assert len(got) == 16
+    assert all(len(k) <= 40 and len(v) <= 200 for k, v in got.items())
