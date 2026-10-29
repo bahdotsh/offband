@@ -139,6 +139,11 @@ invites an outsider into the crew later, this node leaves that MLS group
 and stops writing the board there, and it leaves again each time it is
 invited back while the outsider is in it.
 
+`--allow` holds for one node, not for the room. It gives a clean crew only
+when every node in the room runs with the same addresses. A node that
+allows only some peers, in a room where the others allow anyone, leaves the
+crew the others share and ends up with a board of its own.
+
 ## How it works
 
 On each machine:
