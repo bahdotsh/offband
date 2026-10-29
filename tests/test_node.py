@@ -204,6 +204,7 @@ async def test_a_crew_that_takes_in_an_outsider_is_left(tmp_path):
     api.members = [ME, ADA, EVE]
     assert await n._ensure_crew(create=False) is None
     assert n.crew is None and n.crew_members == []
+    assert ("leave_group", {"group_id": "g1"}) in api.calls
     for task in list(n._tasks):
         task.cancel()
 

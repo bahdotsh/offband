@@ -711,10 +711,16 @@ class Node:
             key = (-len(members), gid, members)
             if best is None or key[:2] < best[:2]:
                 best = key
+        for gid in refused:
+            # A crew that took in a peer outside the allowlist (another member
+            # invited it): leave the MLS group, so this node neither writes
+            # the board where the outsider reads nor stays on its roster.
+            logger.warning("crew %s holds a peer outside --allow; leaving it", gid)
+            try:
+                await self.api.call("leave_group", {"group_id": gid})
+            except (RpcError, ConnectionError) as exc:
+                logger.warning("could not leave crew %s: %s", gid, exc)
         if self.crew in refused:
-            # The crew we use took in a peer outside the allowlist (another
-            # member invited it): stop writing the board where it can read.
-            logger.warning("crew %s now holds a peer outside --allow; leaving it", self.crew)
             self.crew, self.crew_members = None, []
             self._emit({"t": "crew", "crew": None})
             await self._notify()
