@@ -38,14 +38,14 @@ import itertools
 import json
 import logging
 import math
-import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
-from . import APP_ID
+from . import APP_ID, files
+from .files import clean_relative, protected_path
 from .rpc import LocalApi, RpcError
 
 logger = logging.getLogger(__name__)
@@ -79,15 +79,6 @@ CREW_SETTLE = 2.5  # lets the room fill in before the creator picks it
 LOG_LIMIT = 2000
 SEEN_LIMIT = 4096
 
-# A peer's file lands in the workspace only under these folders: the game
-# is the only thing agents share (OFFBAND.md). Anywhere else, a crew member
-# could replace a file the agent runs (Makefile, package.json, a test).
-WRITABLE_ROOTS = ("game",)
-# Nor, even inside them, on these names at any depth (the agent's own
-# instructions) or on any path with a component that starts with "."
-# (.mcp.json, .claude/settings.json, .git/...). Every such file goes to the
-# quarantine under .offband/received/<sender>/ instead.
-PROTECTED_NAMES = frozenset({"claude.md", "claude.local.md", "offband.md", "agents.md", "gemini.md"})
 
 
 class _Recent:
@@ -106,23 +97,6 @@ class _Recent:
             self._items.pop(next(iter(self._items)))
 
 
-def protected_path(parts: list[str]) -> str | None:
-    """The component that makes a relative path unsafe for a peer to write,
-    or None."""
-    for part in parts:
-        if part.startswith(".") or part.lower() in PROTECTED_NAMES:
-            return part
-    return None
-
-
-def writable_path(parts: list[str]) -> str | None:
-    """Why a peer may not write this workspace path, or None if it may."""
-    if len(parts) < 2 or parts[0] not in WRITABLE_ROOTS:
-        return f"a peer may write only under {', '.join(r + '/' for r in WRITABLE_ROOTS)}"
-    blocked = protected_path(parts)
-    return f"a peer may not write {blocked!r} in the workspace" if blocked is not None else None
-
-
 def _not_json(token: str) -> Any:
     raise ValueError(f"{token} is not JSON")
 
@@ -132,13 +106,6 @@ def peer_json(text: str) -> Any:
     Infinity, which no JSON encoder downstream accepts: the API would answer
     500 and the radar could not parse its state. They are refused here."""
     return json.loads(text, parse_constant=_not_json)
-
-
-def quarantine_parts(parts: list[str]) -> list[str]:
-    """The path a quarantined file is saved under. Every part that made it
-    unsafe gets a suffix, so a peer's CLAUDE.md or .claude/ never sits in
-    the workspace tree under a name agent tools load."""
-    return [p + ".quarantined" if protected_path([p]) is not None else p for p in parts]
 
 
 def nesting_depth(value: Any) -> int:
@@ -667,55 +634,6 @@ class Node:
                 pass
         return source.name
 
-    @staticmethod
-    def _clean_relative(encoded_name: str) -> list[str]:
-        """The path a peer asked for, as safe relative parts. ``..`` and
-        absolute paths are reduced to the file name."""
-        relative = unquote(encoded_name).replace("\\", "/")
-        parts = [p for p in relative.split("/") if p not in ("", ".")]
-        if not parts or ".." in parts or relative.startswith("/"):
-            name = parts[-1] if parts and parts[-1] != ".." else ""
-            parts = [name or "received.bin"]
-        return parts
-
-    def _store_received(self, sender: str, encoded_name: str, data: bytes) -> tuple[str, Path | None, str | None]:
-        """Writes a received file. Returns the path the peer asked for, where
-        it was saved (None if nowhere), and a note for the agent."""
-        parts = self._clean_relative(encoded_name)
-        relative = "/".join(parts)
-        # Into the shared workspace at the same path, so the trees converge;
-        # an agent only ever sends files it owns. Only under a writable root,
-        # and never onto the agent's own instructions or settings: anything
-        # else goes to the quarantine.
-        blocked = writable_path(parts)
-        if self.workspace is not None and blocked is None:
-            root = self.workspace.resolve()
-            target = (root / relative).resolve()
-            try:
-                # A symlink in the workspace can point an innocent path at a
-                # protected one (game/cfg -> ../.claude): judge where it lands.
-                blocked = writable_path(list(target.relative_to(root).parts))
-            except ValueError:
-                return relative, None, "not saved: the path leaves the workspace"
-            if blocked is None:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
-                return relative, target, None
-        if self.files_dir is None:
-            return relative, None, "not saved: this node has nowhere to put files"
-        root = (self.files_dir / (re.sub(r"[^A-Za-z0-9]", "", sender)[:24] or "unknown")).resolve()
-        target = (root / "/".join(quarantine_parts(parts))).resolve()
-        try:
-            target.relative_to(root)
-        except ValueError:
-            return relative, None, "not saved: the path leaves the quarantine"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        note = None
-        if blocked is not None and self.workspace is not None:
-            note = f"quarantined: {blocked}"
-        return relative, target, note
-
     # ------------------------------------------------------------------- crew
 
     async def _load_crew(self) -> None:
@@ -1224,15 +1142,16 @@ class Node:
         if refusal is None and (data is None or size > MAX_FILE_BYTES):
             refusal = f"refused: over the {MAX_FILE_BYTES}-byte limit, not saved"
         if refusal is not None:
-            relative = "/".join(self._clean_relative(name))
-            note = refusal
+            relative = "/".join(clean_relative(name))
+            note: str | None = refusal
             logger.warning("refused a file from %s: %s", short(sender), refusal)
         else:
             try:
-                relative, saved, note = await asyncio.to_thread(self._store_received, sender, name, data)
+                stored = await asyncio.to_thread(files.store, self.workspace, self.files_dir, sender, name, data)
+                relative, saved, note = stored.path, stored.saved_to, stored.note
             except (OSError, ValueError) as exc:  # ValueError: a NUL in the name
                 reason = getattr(exc, "strerror", None) or exc
-                relative, note = "/".join(self._clean_relative(name)), f"not saved: {reason}"
+                relative, note = "/".join(clean_relative(name)), f"not saved: {reason}"
         body: dict[str, Any] = {"path": relative, "bytes": size, "saved_to": str(saved) if saved else None}
         if note:
             body["note"] = note
