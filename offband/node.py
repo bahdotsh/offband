@@ -134,6 +134,13 @@ def peer_json(text: str) -> Any:
     return json.loads(text, parse_constant=_not_json)
 
 
+def quarantine_parts(parts: list[str]) -> list[str]:
+    """The path a quarantined file is saved under. Every part that made it
+    unsafe gets a suffix, so a peer's CLAUDE.md or .claude/ never sits in
+    the workspace tree under a name agent tools load."""
+    return [p + ".quarantined" if protected_path([p]) is not None else p for p in parts]
+
+
 def nesting_depth(value: Any) -> int:
     """How deeply lists and objects nest in ``value``, without recursion."""
     deepest, stack = 0, [(value, 1)]
@@ -697,7 +704,7 @@ class Node:
         if self.files_dir is None:
             return relative, None, "not saved: this node has nowhere to put files"
         root = (self.files_dir / (re.sub(r"[^A-Za-z0-9]", "", sender)[:24] or "unknown")).resolve()
-        target = (root / relative).resolve()
+        target = (root / "/".join(quarantine_parts(parts))).resolve()
         try:
             target.relative_to(root)
         except ValueError:

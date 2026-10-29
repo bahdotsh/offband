@@ -259,7 +259,9 @@ that, it keeps a stray device or a hostile peer from doing much harm:
   with any part starting with `.` or named `CLAUDE.md`, `CLAUDE.local.md`,
   `OFFBAND.md`, `AGENTS.md` or `GEMINI.md`. Everything else, including a
   `Makefile`, `package.json` or `.claude/settings.json`, lands in
-  `.offband/received/<sender>/` and the inbox says so. Paths with `..` or
+  `.offband/received/<sender>/` and the inbox says so. There, every part
+  that made a path unsafe gets a `.quarantined` suffix, so a peer's
+  `CLAUDE.md` never sits where agent tools load it. Paths with `..` or
   absolute paths are reduced to their file name. A crew member can still
   rewrite the game, so open it only from peers whose code you would run.
 - **The agent sends only workspace files.** `send_file` refuses a path
