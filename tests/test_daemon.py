@@ -138,3 +138,9 @@ async def test_the_game_redirect_keeps_the_path_encoded(node):
     await app(scope, receive, send)
     assert out["status"] == 307
     assert out["headers"][b"location"] == b"http://localhost:7777/game/a%20b/c%2Fd.js"
+
+
+async def test_a_cors_preflight_is_never_answered(client):
+    r = await client.options("/api/send", headers={"Origin": "http://evil.example",
+                                                   "Access-Control-Request-Method": "POST"})
+    assert r.status_code == 403 and "access-control-allow-origin" not in r.headers
