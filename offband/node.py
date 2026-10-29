@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
 
-from . import APP_ID, files
+from . import files
 from .files import clean_relative, protected_path
 from .rpc import LocalApi, RpcError
 
@@ -81,7 +81,6 @@ SEEN_LIMIT = 4096
 # With --allow, how long a crew check stays good before the next use of the
 # crew asks the service again. Group events clear it at once.
 CREW_CHECK_TTL = 2.0
-
 
 
 class _Recent:
