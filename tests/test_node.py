@@ -417,3 +417,50 @@ async def test_a_crew_that_takes_in_an_outsider_again_is_left_again(tmp_path):
     assert len([c for c in api.calls if c[0] == "leave_group"]) == 2
     for task in list(n._tasks):
         task.cancel()
+
+
+# ------------------------------------------------- fifth review follow-ups
+
+class CrewApi(FakeApi):
+    """One crew, g1, whose roster a test sets."""
+
+    def __init__(self, members: list[str]) -> None:
+        super().__init__()
+        self.members = members
+
+    async def call(self, method, params=None, timeout=60.0):
+        answer = await super().call(method, params, timeout)  # records the call
+        if method == "list_groups":
+            return ["g1"]
+        if method == "get_group_info":
+            return {"name": "offband-crew", "members": list(self.members)}
+        return answer
+
+
+def _leaves(api: FakeApi) -> int:
+    return len([c for c in api.calls if c[0] == "leave_group"])
+
+
+async def test_a_refused_crew_that_invites_this_node_back_is_left_again(tmp_path):
+    api = CrewApi([ME, ADA, EVE])
+    n = Node(api, "Me", tmp_path, allow=[ADA])  # type: ignore[arg-type]
+    n.address = ME
+    await n._load_crew()
+    assert _leaves(api) == 1
+    api.members = [ADA, EVE]  # the leave took effect
+    await n._load_crew()
+    api.members = [ME, ADA, EVE]  # the inviter adds this node again
+    await n._load_crew()
+    assert _leaves(api) == 2 and n.crew is None
+    for task in list(n._tasks):
+        task.cancel()
+
+
+async def test_concurrent_crew_loads_leave_once(tmp_path):
+    import asyncio
+
+    api = CrewApi([ME, ADA, EVE])
+    n = Node(api, "Me", tmp_path, allow=[ADA])  # type: ignore[arg-type]
+    n.address = ME
+    await asyncio.gather(n._load_crew(), n._load_crew(), n._load_crew())
+    assert _leaves(api) == 1

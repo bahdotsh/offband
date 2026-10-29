@@ -646,6 +646,8 @@ class Node:
             return
         best: tuple[Any, ...] | None = None
         refused: set[str] = set()
+        mine: set[str] = set()  # crews that list this node
+        unsure: set[str] = set()  # groups whose info could not be read
         for group_id in group_ids or []:
             gid = group_id if isinstance(group_id, str) else (group_id or {}).get("group_id")
             if not gid:
@@ -653,9 +655,11 @@ class Node:
             try:
                 info = await self.api.call("get_group_info", {"group_id": gid})
             except (RpcError, ConnectionError):
+                unsure.add(gid)
                 continue
             if not info or info.get("name") != CREW_NAME or self.address not in (info.get("members") or []):
                 continue
+            mine.add(gid)
             members = list(info.get("members") or [])
             if not all(m == self.address or self.admitted(m) for m in members):
                 refused.add(gid)  # made or joined by a peer outside the allowlist
@@ -663,16 +667,21 @@ class Node:
             key = (-len(members), gid, members)
             if best is None or key[:2] < best[:2]:
                 best = key
+        # A leave is remembered only while the group still lists this node
+        # (it may, a while after the leave). Once it does not, or once the
+        # crew is clean, the next outsider or re-invitation is left again.
+        self._left_groups = (self._left_groups & (mine | unsure)) - (mine - refused)
         for gid in refused - self._left_groups:
             # A crew that took in a peer outside the allowlist (another member
             # invited it): leave the MLS group, so this node neither writes
             # the board where the outsider reads nor stays on its roster.
-            # Once: the group may list us a while after the leave.
+            # Marked before the call, so a concurrent load does not leave twice.
             logger.warning("crew %s holds a peer outside --allow; leaving it", gid)
+            self._left_groups.add(gid)
             try:
                 await self.api.call("leave_group", {"group_id": gid})
-                self._left_groups.add(gid)
             except (RpcError, ConnectionError) as exc:
+                self._left_groups.discard(gid)
                 logger.warning("could not leave crew %s: %s", gid, exc)
         if self.crew in refused:
             self.crew, self.crew_members = None, []
@@ -681,8 +690,6 @@ class Node:
         if best is None:
             return
         _, gid, members = best
-        # Clean again: should it take in an outsider later, leave it again.
-        self._left_groups.discard(gid)
         changed = gid != self.crew or members != self.crew_members
         previous = self.crew
         self.crew, self.crew_members = gid, members
