@@ -245,6 +245,10 @@ that, it keeps a stray device or a hostile peer from doing much harm:
   different one is ignored, and no peer may take this node's own name. Two
   peers with one name are never guessed between: name the address. The
   inbox gives every sender's address.
+- **Crew claims are claims too.** A peer that says it is in a crew stops
+  this node from making one by itself. A false claim only delays the crew:
+  the first `board_update` makes one after 20 seconds, and the claim lapses
+  when the peer leaves.
 - **What a peer sends is validated.** Unknown message kinds read as chat, a
   peer cannot fake a file notice, messages over 64 KiB are not passed on,
   files over 256 KiB or not valid base64 are refused and never written, and
