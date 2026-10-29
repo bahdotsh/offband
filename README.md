@@ -247,13 +247,17 @@ that, it keeps a stray device or a hostile peer from doing much harm:
   inbox gives every sender's address.
 - **What a peer sends is validated.** Unknown message kinds read as chat, a
   peer cannot fake a file notice, messages over 64 KiB are not passed on,
-  and files over 256 KiB are refused before they are decoded.
-- **A peer cannot rewrite the agent's own files.** A received file goes into
-  the workspace at its relative path, except a path with any part starting
-  with `.` (`.mcp.json`, `.claude/`, `.git/`) or named `CLAUDE.md`,
-  `CLAUDE.local.md`, `OFFBAND.md` or `AGENTS.md`. Those land in
+  files over 256 KiB are refused, and a board task that is not an object
+  reads as a bare title instead of breaking the board.
+- **A peer cannot rewrite the agent's instructions or settings.** A received
+  file goes into the workspace at its relative path, except a path with any
+  part starting with `.` (`.mcp.json`, `.claude/`, `.git/`) or named
+  `CLAUDE.md`, `CLAUDE.local.md`, `OFFBAND.md` or `AGENTS.md`. Those land in
   `.offband/received/<sender>/` and the inbox says so. Paths with `..` or
-  absolute paths are reduced to their file name.
+  absolute paths are reduced to their file name. Any other workspace file,
+  including a `Makefile` or `package.json`, can be overwritten by a crew
+  member: that is how the trees converge, so only work with peers whose
+  files you would run.
 - **The agent sends only workspace files.** `send_file` refuses a path
   outside the workspace, a dot path such as `.env`, and the agent's own
   instruction files, so a prompt or page cannot make it ship `~/.ssh/`.
