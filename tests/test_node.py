@@ -311,3 +311,17 @@ async def test_a_file_event_without_data_writes_nothing(node):
     await node._on_event({"type": "file_received", "sender": ADA, "file_name": "a.txt", "file_data": 7,
                           "file_id": "f-nodata"})
     assert not node.log and not (node.workspace / "a.txt").exists()
+
+
+# ------------------------------------------------- third review follow-ups
+
+async def test_a_file_that_is_not_base64_never_blanks_the_one_there(node):
+    (node.workspace / "game").mkdir()
+    engine = node.workspace / "game" / "engine.js"
+    engine.write_text("export const rules = 42;")
+    await receive_file(node, ADA, "game%2Fengine.js", "!!!not base64!!!")
+    body = last(node).body
+    assert body["note"].startswith("refused") and "base64" in body["note"] and body["saved_to"] is None
+    assert engine.read_text() == "export const rules = 42;"
+
+

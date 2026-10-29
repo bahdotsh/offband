@@ -1173,18 +1173,22 @@ class Node:
         size = chars * 3 // 4
         saved: Path | None = None
         data: bytes | None = None
+        refusal: str | None = None
         if chars <= MAX_FILE_CHARS:
             try:
                 data = base64.b64decode(encoded, validate=True)
+                size = len(data)
             except (binascii.Error, ValueError):
-                data = b""
-            size = len(data)
+                # Never written: an empty file would blank the one already there.
+                refusal = "refused: not valid base64, not saved"
         # The base64 check refuses most oversized files before decoding; the
         # byte check catches the last two bytes base64 padding hides.
-        if data is None or size > MAX_FILE_BYTES:
+        if refusal is None and (data is None or size > MAX_FILE_BYTES):
+            refusal = f"refused: over the {MAX_FILE_BYTES}-byte limit, not saved"
+        if refusal is not None:
             relative = "/".join(self._clean_relative(name))
-            note = f"refused: over the {MAX_FILE_BYTES}-byte limit, not saved"
-            logger.warning("refused a %d-byte file from %s", size, short(sender))
+            note = refusal
+            logger.warning("refused a file from %s: %s", short(sender), refusal)
         else:
             try:
                 relative, saved, note = await asyncio.to_thread(self._store_received, sender, name, data)

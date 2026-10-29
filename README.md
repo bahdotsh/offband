@@ -247,8 +247,9 @@ that, it keeps a stray device or a hostile peer from doing much harm:
   inbox gives every sender's address.
 - **What a peer sends is validated.** Unknown message kinds read as chat, a
   peer cannot fake a file notice, messages over 64 KiB are not passed on,
-  files over 256 KiB are refused, and a board task that is not an object
-  reads as a bare title instead of breaking the board.
+  files over 256 KiB or not valid base64 are refused and never written, and
+  a board task that is not an object reads as a bare title instead of
+  breaking the board.
 - **A peer cannot rewrite the agent's instructions or settings.** A received
   file goes into the workspace at its relative path, except a path with any
   part starting with `.` (`.mcp.json`, `.claude/`, `.git/`) or named
