@@ -4,7 +4,8 @@ A peer's file goes into the workspace at its relative path only under a
 writable root (``game/``), and never on a dot path or on the agent's own
 instruction files. Everything else goes to the quarantine under
 ``.offband/received/<sender>/``, where every part that made the path unsafe
-gets a ``.quarantined`` suffix.
+gets a ``.quarantined`` suffix. Paths are judged where they land, after
+symlinks, not only as the peer wrote them.
 
 The functions here touch the file system only in ``store``.
 """
@@ -70,6 +71,44 @@ def clean_relative(encoded_name: str) -> list[str]:
     return parts
 
 
+class _Leaves(Exception):
+    """The path resolves outside the workspace."""
+
+
+def _in_place(workspace: Path, parts: list[str]) -> tuple[Path | None, str | None]:
+    """Where ``parts`` lands in the workspace, judged after symlinks: the
+    target and None, or None and why not. Raises _Leaves for a path that
+    resolves outside the workspace."""
+    root = workspace.resolve()
+    # The writable root may itself be a link (game -> src/game): what counts
+    # is the folder it names, which must be inside the workspace, below it,
+    # and not protected.
+    game = (root / parts[0]).resolve()
+    try:
+        game_inside = game.relative_to(root)
+    except ValueError:
+        raise _Leaves from None
+    if not game_inside.parts:
+        return None, f"{parts[0]}/ is the workspace itself"
+    blocked = protected_path(game_inside.parts)
+    if blocked is not None:
+        return None, f"a peer may not write {blocked!r} in the workspace"
+    target = (root / "/".join(parts)).resolve()
+    try:
+        rest = target.relative_to(game)
+    except ValueError:
+        # A link inside the root points elsewhere (game/cfg -> ../.claude).
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise _Leaves from None
+        return None, f"a peer may write only under {', '.join(r + '/' for r in WRITABLE_ROOTS)}"
+    blocked = protected_path(rest.parts)
+    if blocked is not None:
+        return None, f"a peer may not write {blocked!r} in the workspace"
+    return target, None
+
+
 def store(workspace: Path | None, quarantine: Path | None, sender: str, encoded_name: str, data: bytes) -> Stored:
     """Writes a received file into the workspace, or into the quarantine.
     Raises OSError, or ValueError for a NUL in the name."""
@@ -77,15 +116,11 @@ def store(workspace: Path | None, quarantine: Path | None, sender: str, encoded_
     relative = "/".join(parts)
     blocked = writable_path(parts)
     if workspace is not None and blocked is None:
-        root = workspace.resolve()
-        target = (root / relative).resolve()
         try:
-            # A symlink in the workspace can point an innocent path at a
-            # protected one (game/cfg -> ../.claude): judge where it lands.
-            blocked = writable_path(list(target.relative_to(root).parts))
-        except ValueError:
+            target, blocked = _in_place(workspace, parts)
+        except _Leaves:
             return Stored(relative, None, "not saved: the path leaves the workspace")
-        if blocked is None:
+        if target is not None:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
             return Stored(relative, target)
