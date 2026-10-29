@@ -28,10 +28,10 @@ def test_fresh_deletes_a_node_home_and_nothing_else(tmp_path):
     stranger = tmp_path / "docs"
     stranger.mkdir()
     (stranger / "thesis.tex").write_text("years of work")
-    with pytest.raises(SystemExit):
+    with pytest.raises(cli.HomeError):
         cli.reset_home(stranger)
     (stranger / "config.json").write_text("{}")
-    with pytest.raises(SystemExit):
+    with pytest.raises(cli.HomeError):
         cli.reset_home(stranger)  # looks like a home, but holds other files
     assert (stranger / "thesis.tex").exists()
 
@@ -57,6 +57,16 @@ def test_fresh_refuses_a_symlinked_home(tmp_path):
     (real / "keys").mkdir(parents=True)
     link = tmp_path / "link"
     link.symlink_to(real)
-    with pytest.raises(SystemExit, match="symbolic link"):
+    with pytest.raises(cli.HomeError, match="symbolic link"):
         cli.reset_home(link)
     assert (real / "keys").exists()
+
+
+def test_rehearse_refuses_a_bad_home_before_starting_anything(tmp_path, capsys):
+    home = tmp_path / ".ada-node"
+    home.mkdir()
+    (home / "thesis.tex").write_text("years of work")
+    assert cli.main(["rehearse", "--root", str(tmp_path), "--fresh"]) == 2
+    assert "not an Offband node home" in capsys.readouterr().err
+    assert (home / "thesis.tex").exists()
+    assert not (tmp_path / "ada").exists()  # no workspace made, no service spawned

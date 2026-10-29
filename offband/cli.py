@@ -50,9 +50,7 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
     from .node import Node
     from .rpc import LocalApi
 
-    home = Path(args.home).expanduser() if args.home else default_home(args.name.lower())
-    if args.fresh:
-        reset_home(home)
+    home = node_home(args)
     spec = ServiceSpec(home=home, transport=args.transport, listen=args.listen, peers=args.peer,
                        lan_discovery=args.lan_discovery, log_level=args.log_level)
     workspace = Path(args.workspace).expanduser().resolve()
@@ -92,23 +90,43 @@ async def _run_node(args: argparse.Namespace, stop: asyncio.Event) -> int:
                 proc.kill()
 
 
+class HomeError(Exception):
+    """A node home --fresh will not delete."""
+
+
+def node_home(args: argparse.Namespace) -> Path:
+    return Path(args.home).expanduser() if args.home else default_home(args.name.lower())
+
+
+def _reset_homes(homes: list[Path]) -> bool:
+    """Runs --fresh before any service starts, so a refusal stops the
+    command cleanly instead of escaping from inside a running node."""
+    try:
+        for home in homes:
+            reset_home(home)
+    except HomeError as exc:
+        print(f"--fresh: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
 def reset_home(home: Path) -> None:
     """Deletes a node home, so the node starts with a new identity and none
     of the last run's crew or board. Refuses a directory that does not look
     like a node home, so a mistyped --home never deletes anything else."""
     if home.is_symlink():
         # rmtree refuses a link, and following it would delete its target.
-        raise SystemExit(f"--fresh: {home} is a symbolic link; give the real directory with --home")
+        raise HomeError(f"{home} is a symbolic link; give the real directory with --home")
     if not home.exists():
         return
     markers = ("config.json", "store.key", "keys", "state")
     if not home.is_dir() or not any((home / m).exists() for m in markers):
-        raise SystemExit(f"--fresh: {home} is not an Offband node home; not deleting it")
+        raise HomeError(f"{home} is not an Offband node home; not deleting it")
     # Finder drops .DS_Store into any folder it shows; it is not user data.
     tolerated = markers + ("service.log", "service.log.1", ".DS_Store")
     unexpected = [p.name for p in home.iterdir() if p.name not in tolerated]
     if unexpected:
-        raise SystemExit(f"--fresh: {home} holds files Offband did not make ({', '.join(unexpected)}); not deleting it")
+        raise HomeError(f"{home} holds files Offband did not make ({', '.join(unexpected)}); not deleting it")
     shutil.rmtree(home)
 
 
@@ -137,6 +155,8 @@ def cmd_up(args: argparse.Namespace) -> int:
     if problem:
         print(problem, file=sys.stderr)
         return 2
+    if args.fresh and not _reset_homes([node_home(args)]):
+        return 2
     return _main_async(lambda stop: _run_node(args, stop))
 
 
@@ -149,17 +169,20 @@ def cmd_rehearse(args: argparse.Namespace) -> int:
         return 2
     ports = [args.port + i for i in range(len(names))]
     links = [f"127.0.0.1:{args.link_port + i}" for i in range(len(names))]
+    homes = [root / f".{name.lower()}-node" for name in names]
+    if args.fresh and not _reset_homes(homes):
+        return 2
 
     async def run_all(stop: asyncio.Event) -> int:
         runs = []
         for i, name in enumerate(names):
             ns = argparse.Namespace(
-                name=name, workspace=str(root / name.lower()), port=ports[i], home=str(root / f".{name.lower()}-node"),
+                name=name, workspace=str(root / name.lower()), port=ports[i], home=str(homes[i]),
                 # Each pair is dialled from one side only, the later node
                 # dialling the earlier ones: two nodes dialling each other at
                 # once can lose the first key exchange (README, Known issues).
                 transport="lan", listen=links[i], peer=links[:i], lan_discovery=False, game_dir=None,
-                allow=[], fresh=args.fresh, log_level=args.log_level,
+                allow=[], log_level=args.log_level,
             )
             init_workspace(Path(ns.workspace), name, ports[i], quiet=True)
             runs.append(asyncio.create_task(_run_node(ns, stop)))
